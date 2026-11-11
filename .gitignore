@@ -1,0 +1,37 @@
+# Python 字节码与缓存
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 编辑器与 IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 操作系统
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 密钥与环境变量（绝不入库）
+.env
+.env.*
+!.env.example
+
+# 日志与临时产物
+*.log
+tmp/
+.tmp/
+test-artifacts/
+
+# 本地生成的测试作品与导出稿
+作品库/
+导出/

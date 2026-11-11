@@ -1,0 +1,18 @@
+# 仓库内文本统一 LF。
+# 原因：Python 3.9 的 Windows 构建在直接执行 CRLF 保存的源文件时，会因 tokenizer
+# 读取边界把多字节汉字切断而误报
+#   SyntaxError: Non-UTF-8 code starting with '\xe5' ... but no encoding declared
+# 同一文件改为 LF 后可正常执行（3.14 不受影响）。CI 的 Windows 与 Linux 作业
+# 需要一致的源码字节，故在仓库层面固定行尾。
+* text=auto eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+
+# 二进制文件不做行尾转换
+*.pyc binary
+*.png binary
+*.jpg binary
+*.zip binary

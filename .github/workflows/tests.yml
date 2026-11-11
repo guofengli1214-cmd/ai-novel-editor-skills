@@ -1,0 +1,44 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unittest:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Python 3.9 固定使用 22.04，避免随 latest 镜像升级改变兼容基线。
+          - os: ubuntu-22.04
+            python: '3.9'
+          - os: ubuntu-latest
+            python: '3.14'
+          - os: windows-latest
+            python: '3.9'
+          - os: windows-latest
+            python: '3.14'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Run filesystem and CLI tests
+        env:
+          PYTHONUTF8: '1'
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python tests/run_suite.py --report-dir test-artifacts
+      - name: Preserve platform and test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}-python-${{ matrix.python }}
+          path: test-artifacts/
+          if-no-files-found: error

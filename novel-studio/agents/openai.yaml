@@ -1,0 +1,4 @@
+interface:
+  display_name: "长篇小说创作工作室"
+  short_description: "以子 agent 创作与独立评审，持续维护长篇小说的文件记忆和交接"
+  default_prompt: "使用 $novel-studio 帮我创作或接续一本长篇小说，由子 agent 写作、维护资料并逐章独立评审。"
