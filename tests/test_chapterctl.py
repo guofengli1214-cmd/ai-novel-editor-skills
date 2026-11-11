@@ -348,6 +348,147 @@ class ChapterTests(unittest.TestCase):
             kernel.CloseHandle.assert_called_once_with(42)
             killed.assert_not_called()
 
+    def windows_kernel(self, started):
+        kernel = Mock()
+        kernel.OpenProcess.return_value = 42
+        def set_exit_code(handle, result):
+            result._obj.value = 259
+            return True
+        def set_times(handle, created, exited, kernel_time, user_time):
+            created._obj.dwHighDateTime = started >> 32
+            created._obj.dwLowDateTime = started & 0xFFFFFFFF
+            return True
+        kernel.GetExitCodeProcess.side_effect = set_exit_code
+        kernel.GetProcessTimes.side_effect = set_times
+        return kernel
+
+    def test_windows_lock_owner_records_full_creation_filetime(self):
+        import ctypes
+        started = 0x01DD123456789ABC
+        kernel = self.windows_kernel(started)
+        windows_os = Mock(wraps=os)
+        windows_os.name = 'nt'
+        with patch.object(cc, 'os', windows_os), patch.object(ctypes, 'WinDLL', create=True, return_value=kernel):
+            with cc.locked(self.root):
+                owner = cc.read_json(cc.lock_path(self.root) / 'owner.json')
+                self.assertEqual(owner['pid'], os.getpid())
+                self.assertEqual(owner['process_start_time'], started)
+                self.assertEqual(owner['book'], str(self.root))
+        self.assertFalse(cc.lock_path(self.root).exists())
+        kernel.OpenProcess.assert_called_once_with(0x1000, False, os.getpid())
+        kernel.CloseHandle.assert_called_once_with(42)
+
+    def test_windows_reused_pid_unlocks_without_changing_pending_or_journals(self):
+        import ctypes
+        result = self.adopt()
+        lock = self.stale_lock()
+        cc.save(lock / 'owner.json', dict(pid=123456, book=str(self.root), process_start_time=100))
+        before = nc.inventory(self.root)
+        kernel = self.windows_kernel(200)
+        windows_os = Mock(wraps=os)
+        windows_os.name = 'nt'
+        with patch.object(cc, 'os', windows_os), patch.object(ctypes, 'WinDLL', create=True, return_value=kernel):
+            unlocked = cc.unlock(self.root, dict(confirm_no_writer=True, expected_pending=[result['operation_id']]))
+        self.assertTrue(unlocked['ok'])
+        self.assertFalse(lock.exists())
+        self.assertEqual(nc.inventory(self.root), before)
+        kernel.CloseHandle.assert_called_once_with(42)
+        windows_os.kill.assert_not_called()
+
+    def test_windows_same_process_identity_still_blocks_unlock(self):
+        import ctypes
+        lock = self.stale_lock()
+        owner = dict(pid=123456, book=str(self.root), process_start_time=100)
+        cc.save(lock / 'owner.json', owner)
+        kernel = self.windows_kernel(100)
+        windows_os = Mock(wraps=os)
+        windows_os.name = 'nt'
+        with patch.object(cc, 'os', windows_os), patch.object(ctypes, 'WinDLL', create=True, return_value=kernel):
+            with self.assertRaisesRegex(ValueError, 'PID is alive'):
+                cc.unlock(self.root, dict(confirm_no_writer=True, expected_pending=[]))
+        self.assertEqual(cc.read_json(lock / 'owner.json'), owner)
+        self.assertFalse(lock.with_name(lock.name + '.unlock').exists())
+        kernel.CloseHandle.assert_called_once_with(42)
+
+    def test_windows_legacy_live_pid_is_not_treated_as_reused(self):
+        import ctypes
+        lock = self.stale_lock()
+        kernel = self.windows_kernel(200)
+        windows_os = Mock(wraps=os)
+        windows_os.name = 'nt'
+        with patch.object(cc, 'os', windows_os), patch.object(ctypes, 'WinDLL', create=True, return_value=kernel):
+            with self.assertRaisesRegex(ValueError, 'PID is alive'):
+                cc.unlock(self.root, dict(confirm_no_writer=True, expected_pending=[]))
+        self.assertTrue((lock / 'owner.json').is_file())
+        kernel.GetProcessTimes.assert_not_called()
+
+    def test_windows_creation_time_query_failure_preserves_lock(self):
+        import ctypes
+        lock = self.stale_lock()
+        cc.save(lock / 'owner.json', dict(pid=123456, book=str(self.root), process_start_time=100))
+        original = (lock / 'owner.json').read_bytes()
+        kernel = self.windows_kernel(100)
+        kernel.GetProcessTimes.side_effect = None
+        kernel.GetProcessTimes.return_value = False
+        windows_os = Mock(wraps=os)
+        windows_os.name = 'nt'
+        with patch.object(cc, 'os', windows_os), patch.object(ctypes, 'WinDLL', create=True, return_value=kernel):
+            with self.assertRaisesRegex(ValueError, 'cannot query.*creation time'):
+                cc.unlock(self.root, dict(confirm_no_writer=True, expected_pending=[]))
+        self.assertEqual((lock / 'owner.json').read_bytes(), original)
+        self.assertFalse(lock.with_name(lock.name + '.unlock').exists())
+        kernel.CloseHandle.assert_called_once_with(42)
+
+    def test_windows_access_denied_does_not_prove_a_reused_pid(self):
+        import ctypes
+        lock = self.stale_lock()
+        cc.save(lock / 'owner.json', dict(pid=123456, book=str(self.root), process_start_time=100))
+        kernel = self.windows_kernel(200)
+        kernel.OpenProcess.return_value = 0
+        windows_os = Mock(wraps=os)
+        windows_os.name = 'nt'
+        with patch.object(cc, 'os', windows_os), patch.object(ctypes, 'WinDLL', create=True, return_value=kernel), patch.object(ctypes, 'get_last_error', create=True, return_value=5):
+            with self.assertRaisesRegex(ValueError, 'PID is alive'):
+                cc.unlock(self.root, dict(confirm_no_writer=True, expected_pending=[]))
+        self.assertTrue((lock / 'owner.json').is_file())
+        kernel.CloseHandle.assert_not_called()
+
+    def test_windows_owner_identity_failure_releases_empty_lock(self):
+        import ctypes
+        kernel = self.windows_kernel(100)
+        kernel.GetProcessTimes.side_effect = None
+        kernel.GetProcessTimes.return_value = False
+        windows_os = Mock(wraps=os)
+        windows_os.name = 'nt'
+        with patch.object(cc, 'os', windows_os), patch.object(ctypes, 'WinDLL', create=True, return_value=kernel):
+            with self.assertRaisesRegex(ValueError, 'creation time'):
+                with cc.locked(self.root):
+                    self.fail('writer must not enter without its process identity')
+        self.assertFalse(cc.lock_path(self.root).exists())
+        kernel.CloseHandle.assert_called_once_with(42)
+
+    def test_invalid_owner_creation_time_cannot_release_a_lock(self):
+        lock = self.stale_lock()
+        for started in (None, True, 0, -1, '100', 2**64):
+            with self.subTest(started=started):
+                owner = dict(pid=123456, book=str(self.root), process_start_time=started)
+                cc.save(lock / 'owner.json', owner)
+                with self.assertRaisesRegex(ValueError, 'invalid lock owner process_start_time'):
+                    cc.unlock(self.root, dict(confirm_no_writer=True, expected_pending=[]))
+                self.assertEqual(cc.read_json(lock / 'owner.json'), owner)
+
+    def test_windows_dead_pid_with_creation_time_can_unlock(self):
+        import ctypes
+        lock = self.stale_lock()
+        cc.save(lock / 'owner.json', dict(pid=123456, book=str(self.root), process_start_time=100))
+        kernel = self.windows_kernel(100)
+        kernel.OpenProcess.return_value = 0
+        windows_os = Mock(wraps=os)
+        windows_os.name = 'nt'
+        with patch.object(cc, 'os', windows_os), patch.object(ctypes, 'WinDLL', create=True, return_value=kernel), patch.object(ctypes, 'get_last_error', create=True, return_value=87):
+            self.assertTrue(cc.unlock(self.root, dict(confirm_no_writer=True, expected_pending=[]))['ok'])
+        self.assertFalse(lock.exists())
+
     def test_check_quick_mode_is_readonly_and_opt_in(self):
         nc.index_book(self.root)
         before = nc.inventory(self.root)

@@ -29,6 +29,8 @@ from journal/backup; finish only accepts an installed chapter. Never manufacture
 subagent completion records. Concurrent cooperating writers are serialized;
 Stale locks require unlock with confirm_no_writer:true and expected_pending:[IDs].
 Unlock preserves pending operations and their journals; recovery remains explicit.
+New Windows locks bind the owner PID to its process creation time. Legacy locks
+without that identity retain the conservative live-PID check; no force bypass.
 Other tools/agents must not mutate the book during either writing command.
 
 Minimal JSON examples; replace H with actual draft SHA-256:
@@ -114,33 +116,56 @@ def lock_path(root):
     return root.parent / ('.chapterctl-' + key + '.lock')
 
 
-def process_alive(pid):
+def windows_process_state(pid, *, include_start=False):
+    """Read liveness and optional creation FILETIME from the same query handle."""
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    kernel.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel.GetProcessTimes.argtypes = (wintypes.HANDLE,) + (ctypes.POINTER(wintypes.FILETIME),) * 4
+    kernel.GetProcessTimes.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel.CloseHandle.restype = wintypes.BOOL
+    handle = kernel.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        error = ctypes.get_last_error()
+        if error == 87:  # ERROR_INVALID_PARAMETER: no process with this PID.
+            return False, None
+        if error == 5:  # ERROR_ACCESS_DENIED: conservatively assume alive.
+            return True, None
+        raise ValueError('cannot verify lock owner PID: Windows error ' + str(error))
+    try:
+        code = wintypes.DWORD()
+        require(kernel.GetExitCodeProcess(handle, ctypes.byref(code)), 'cannot query lock owner PID')
+        if code.value != 259:  # STILL_ACTIVE
+            return False, None
+        if not include_start:
+            return True, None
+        created, exited, kernel_time, user_time = (wintypes.FILETIME() for _ in range(4))
+        require(kernel.GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(exited),
+                                       ctypes.byref(kernel_time), ctypes.byref(user_time)),
+                'cannot query lock owner process creation time')
+        started = (created.dwHighDateTime << 32) | created.dwLowDateTime
+        require(started > 0, 'invalid lock owner process creation time')
+        return True, started
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def process_alive(pid, *, expected_start_time=None):
     require(type(pid) is int and 0 < pid <= 0xFFFFFFFF, 'invalid lock owner PID; inspect lock manually')
+    if expected_start_time is not None:
+        require(type(expected_start_time) is int and 0 < expected_start_time < 2**64,
+                'invalid lock owner process_start_time; inspect lock manually')
     if os.name == 'nt':
-        # Query a Windows process handle; os.kill is not used for this probe.
-        import ctypes
-        from ctypes import wintypes
-        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
-        kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-        kernel.OpenProcess.restype = wintypes.HANDLE
-        kernel.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
-        kernel.GetExitCodeProcess.restype = wintypes.BOOL
-        kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
-        kernel.CloseHandle.restype = wintypes.BOOL
-        handle = kernel.OpenProcess(0x1000, False, pid)
-        if not handle:
-            error = ctypes.get_last_error()
-            if error == 87:  # ERROR_INVALID_PARAMETER: no process with this PID.
-                return False
-            if error == 5:  # ERROR_ACCESS_DENIED: conservatively assume alive.
-                return True
-            raise ValueError('cannot verify lock owner PID: Windows error ' + str(error))
-        try:
-            code = wintypes.DWORD()
-            require(kernel.GetExitCodeProcess(handle, ctypes.byref(code)), 'cannot query lock owner PID')
-            return code.value == 259  # STILL_ACTIVE
-        finally:
-            kernel.CloseHandle(handle)
+        alive, started = windows_process_state(pid, include_start=expected_start_time is not None)
+        # Access denied (no start time) is not evidence that the owner exited.
+        return alive and (expected_start_time is None or started is None or
+                          started == expected_start_time)
+    require(expected_start_time is None, 'cannot verify Windows process creation time on this platform')
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -165,6 +190,10 @@ def locked(root):
     owner = dict(pid=os.getpid(), book=str(root), token=uuid.uuid4().hex)
     saved = False
     try:
+        if os.name == 'nt':
+            alive, started = windows_process_state(owner['pid'], include_start=True)
+            require(alive and started is not None, 'cannot record lock owner process creation time')
+            owner['process_start_time'] = started
         save(lock / 'owner.json', owner)
         saved = True
         # A recovery may have claimed an empty lock between mkdir and save.
@@ -212,7 +241,10 @@ def unlock(book, request):
             require(not nc.is_link_or_reparse(owner_file) and owner_file.is_file(), 'unsafe lock owner file')
             owner = read_json(owner_file)
             require(owner.get('book') == str(root), 'lock owner book mismatch')
-            require(not process_alive(owner.get('pid')), 'lock owner PID is alive; stop writer before unlocking')
+            require('process_start_time' not in owner or owner['process_start_time'] is not None,
+                    'invalid lock owner process_start_time; inspect lock manually')
+            require(not process_alive(owner.get('pid'), expected_start_time=owner.get('process_start_time')),
+                    'lock owner PID is alive; stop writer before unlocking')
             owner_file.unlink()
         # Never recursively remove unknown files. Concurrent recovery attempts
         # are excluded by the sibling guard, including for an ownerless lock.

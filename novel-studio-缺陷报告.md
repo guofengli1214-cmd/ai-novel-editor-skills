@@ -434,7 +434,7 @@ Codex 专用界面元数据（`display_name`/`default_prompt`），Hermes 与其
 | D3 | 交接同时接受 `第1章`、`第0001章` 或完整正式章文件名 |
 | D4 | 权威 JSON 只在任务受管标记内提取；标记外的 JSON 示例由 check/render/update 保留 |
 | D5 | 路径遍历与写入检查内部 symlink/reparse point 及路径包含关系；Windows 根 junction 与内部 junction 分别有用例 |
-| D6 | 提供显式 `chapterctl unlock`，核对当前 pending、确认无写入者并拒绝活 PID；不静默删除残留锁或日志 |
+| D6 | 提供显式 `chapterctl unlock`，核对当前 pending、确认无写入者；Windows 新锁结合 PID 与进程创建时间识别写入者，旧锁缺创建时间时保守拒绝活 PID；不静默删除残留锁或日志 |
 | D7、D13 | 创建前拒绝 Windows 非法、保留及尾随空格/点书名；自动创建缺失作品库，初始化失败清理本次半成品 |
 | D8 | 扫描 Markdown 本地链接前屏蔽围栏和行内代码；正确处理转义反引号，正文中的坏链接仍须修复 |
 | D9 | pending 告警仅输出操作摘要与日志入口，完整请求留在日志 |
@@ -444,7 +444,7 @@ Codex 专用界面元数据（`display_name`/`default_prompt`），Hermes 与其
 | D14 | 用户命令示例统一用 `python`，明确 Linux/macOS 的 `python3` 和 Windows 的 `py -3` 替换方式及 shell 差异 |
 | D15 | 核对当前仓库已有的 MIT `LICENSE` 与 README 许可说明，未另行更改许可证 |
 | D16 | frontmatter description 为 53 字符，细节保留在正文 |
-| D17 | Skill 入口精简，按步骤和小节读取参考文档，不再要求每章通读全部规范 |
+| D17 | 部分改善：Skill 入口精简，按步骤和小节读取参考文档，不再要求每章通读全部规范；参考文档总体体量仍需维护 |
 | D18 | 说明 `agents/openai.yaml` 仅供 Codex 界面使用，其他宿主直接读取 `SKILL.md` |
 | I1、I2 | 已结束任务不可续聊时新派真实 agent；快速上手给出四组顺序派工，并保留逐项验收与必要返工 |
 | I3 | 保留身份/授权仅为申报的边界，由主 agent 对照实际宿主记录和作者决定核验 |
@@ -471,3 +471,9 @@ py -3 tests/run_suite.py --report-dir test-artifacts
 若没有 `py` 启动器，可使用 `python` 替换；先确认版本与执行路径。`test-artifacts/test-results.json` 记录环境、源码哈希、每个用例及跳过原因，`test-results.xml` 保存 JUnit 结果。普通权限下 symlink 测试可因权限跳过，junction 用例应独立执行；不能把这类跳过视为 junction 防护已通过。
 
 若将来复验，使用临时作品副本，避免覆盖真实作品或删除未经确认的锁内残留。本次未执行该平台复验，不能把 CI 配置或本地模拟结果视为原生 Windows 通过。
+
+## 十、用户提供的复测反馈（`b2bf15e`）
+
+2026-11-11 晚收到用户 Windows 真机复测报告：Windows 11 22631 / Python 3.14.9 / git-bash，109 项中 106 通过、3 项因 WinError 1314 跳过、0 失败；两个 junction 用例实际通过，用户报告四个 CI 作业通过。该报告确认原有修复可用，D6 为受控解锁设计，D17 为部分改善。三项符号链接测试未在该用户环境执行，不能用 junction 结果替代。
+
+复测另指出 PID 复用可能误阻止 `unlock`，后续修复采用 Windows 进程创建时间区分同 PID 的不同进程，同时保留旧锁保守检查、显式确认和 pending 核对；未引入强制绕过或额外模块。报告来源及未覆盖范围见[验证记录](验证记录.md)；本轮未重复 Windows 真机测试或独立核验远端 CI。

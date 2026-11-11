@@ -188,7 +188,7 @@ python tests/run_suite.py --report-dir test-artifacts
 
 测试覆盖文件、章节采用、快照恢复、全书定稿、任务依赖与证据失效，以及本次缺陷修复回归。运行器在 `test-artifacts/` 保存实际平台、Python 版本、源码哈希、每个用例与跳过原因的 JSON / JUnit 报告。
 
-已配置 Linux/Windows × Python 3.9/3.14 的 GitHub Actions；配置本身不是运行通过的证据。Windows 普通权限下无法创建 symlink 时，仅跳过对应测试，junction 防护独立覆盖。本次按要求不做 Windows 真机或 Wine 测试，本地实际结果及未验证范围见 [`验证记录.md`](验证记录.md)。
+已配置 Linux/Windows × Python 3.9/3.14 的 GitHub Actions；配置本身不是运行通过的证据。用户提供的 `b2bf15e` Windows 复测报告记录 109 项：106 通过、3 项因 WinError 1314 跳过，两个 junction 用例实际通过，并报告四个 CI 作业通过；这些为用户提供的版本结果，本轮未独立重跑 Windows 或核验远端 CI。详情及本地回归见 [`验证记录.md`](验证记录.md)。
 
 ## 十、已知边界
 

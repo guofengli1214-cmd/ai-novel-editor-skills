@@ -124,7 +124,7 @@ python "$SKILL/scripts/chapterctl.py" --help
 python "$SKILL/scripts/chapterctl.py" unlock --book "$BOOK" --request /绝对路径/解锁请求.json
 ```
 
-请求为 `{"confirm_no_writer":true,"expected_pending":[]}`；有 pending 时 `expected_pending` 必须列出全部当前 `operation_id`，例如 `["实际操作号"]`。工具拒绝活 PID、待办不匹配或锁内未知文件；缺少 owner 的空残留锁也须操作者显式确认。解锁不删除 pending、备份或日志，不代表采用或同步完成，之后仍沿原操作恢复。不要删除锁内不明文件来强行通过。
+请求为 `{"confirm_no_writer":true,"expected_pending":[]}`；有 pending 时 `expected_pending` 必须列出全部当前 `operation_id`，例如 `["实际操作号"]`。Windows 新锁记录持锁进程的创建时间，解锁时同时比较 PID 与创建时间；同 PID 已被另一进程复用时，不将其误认成原写入者。同一持锁进程仍存活时拒绝解锁；旧锁缺少创建时间时仍保守拒绝活 PID，读取进程信息失败也不能作为绕过依据。待办不匹配或锁内未知文件同样拒绝；缺少 owner 的空残留锁也须操作者显式确认。解锁不删除 pending、备份或日志，不代表采用或同步完成，之后仍沿原操作恢复。不要删除锁内不明文件来强行通过。
 
 不得在写入任务运行时恢复。主 agent 调度保证一个作品同一时刻只有一个采用/恢复写入者；各并行任务写隔离候选目录。工具使用原子文件替换和待办记录，不能把普通文件更新宣称成数据库事务；多进程异常仍需检查和恢复。
 
