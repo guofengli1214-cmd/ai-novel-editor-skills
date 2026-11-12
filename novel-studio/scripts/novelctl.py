@@ -369,7 +369,7 @@ def init_book(parent, title, *, task_management=True):
             import taskctl
             taskctl.initialize(book)
             task_link = '- [阶段任务与验收](任务计划与验收.md)\n'
-        atomic_write(book / '创作约定/写作进度与接续说明.md', '# 写作进度与接续说明\n\n文件约定版本：1\n当前方案：待定；正式章节：无；故事时点：待定。\n作者参与：先试写，未确认其他授权。\n\n## 交接入口\n\n- [资料索引](索引.md)\n- [全书索引](../索引.md)\n' + task_link + '\n## 待补充与下一步\n\n创作意图、语言标准与代表片段、阶段目标、故事线、人物成长与关系、近期事件、伏笔、知情与资源状态均待建立。\n独立阅读反馈与构思风险待记录。作者决定、未核实项、冲突与过期资料待核对。\n写前必读：本文件及全书索引；尚未进行正文与文学检查。\n中断更新事项以作品状态.json 的 pending_operations 为准。\n')
+        atomic_write(book / '创作约定/写作进度与接续说明.md', '# 写作进度与接续说明\n\n文件约定版本：1\n当前方案：待定；正式章节：无；故事时点：待定。\n作者参与与资料建设模式：待记录真实约定；尚无后续创作授权。\n\n## 交接入口\n\n- [资料索引](索引.md)\n- [全书索引](../索引.md)\n' + task_link + '\n## 待补充与下一步\n\n创作意图、语言标准与代表片段、阶段目标、故事线、人物成长与关系、近期事件、伏笔、知情与资源状态均待建立。\n独立阅读反馈与构思风险待记录。作者决定、未核实项、冲突与过期资料待核对。\n写前必读：本文件及全书索引；尚未进行正文与文学检查。\n中断更新事项以作品状态.json 的 pending_operations 为准。\n')
         index_book(book)
     except Exception:
         # Only remove the directory this invocation created. An existing work

@@ -5,13 +5,15 @@ The authoritative JSON and its derived Markdown checkboxes live together in
 创作约定/任务计划与验收.md. Notes outside the managed markers are preserved.
 init creates S01/planning; plan accepts {id,title,workflow,chapter?,next_stage?,
 end_reason?}. update accepts {stage,task,status,inputs?,outputs?,verification?,
-reason?,operation_id?}; task may be its full ID or a kind within that stage.
+reason?,operation_id?,checks?}; submit uses the same request without status and
+registers actual outputs as submitted, never accepted. New stages default to
+workflow_version 2; a missing version means historical version 1.
 Evidence is [{path,sha256}], verification is {agent_id,source}; identities and
 acceptance are host assertions, not authentication. Core tasks cannot be skipped.
 next_plan needs verification and an existing detailed next stage or end_reason,
 without hashing this ledger. Other completed tasks need current output evidence.
 
-Commands: init, plan, update, render, check [--stage ID], gate --stage ID
+Commands: init, plan, update, submit, render, check [--stage ID], gate --stage ID
 --before KIND, close --stage ID. All take --book DIR. plan/update --request
 accept inline JSON, @file or a JSON-file path. render refreshes checkboxes after
 intentional JSON edits (including optional research tasks). It does not grant
@@ -58,6 +60,21 @@ TASK_DEFAULTS = {
     'structural_revision': ('全书结构修订', 'writer', '处理整体问题并提供修订对照及取舍理由。'),
     'whole_recheck': ('全书修订复核', 'reviewer', '复核当前全部正式正文与整体修订结果。'),
     'finalize': ('全书定稿验收', 'materials', '核验完整清单、独立阅读和修订证据。'),
+}
+EDITORIAL_CHECKS = {
+    'direction': ('author_preferences', 'startup_mode', 'authorization'),
+    'concept': ('story_engine',),
+    'prepare': ('author_preferences', 'chapter_design', 'global_direction', 'source_status', 'prose_policy'),
+    'voice_trial': ('style_scope',),
+    'first_read': ('reader_experience',),
+    'review': ('editorial_findings', 'global_direction'),
+    'revise': ('issue_disposition',),
+    'recheck': ('current_version', 'issue_disposition'),
+    'sync': ('source_status', 'handoff'),
+    'next_plan': ('global_direction', 'handoff'),
+    'whole_read': ('reader_experience', 'global_direction'),
+    'structural_revision': ('issue_disposition',),
+    'whole_recheck': ('current_version', 'issue_disposition'),
 }
 
 
@@ -129,6 +146,35 @@ def evidence_structure(root, evidence):
         require(isinstance(item.get('sha256'), str) and re.fullmatch('[0-9a-f]{64}', item['sha256']), 'invalid evidence sha256')
 
 
+def workflow_version(stage):
+    value = stage.get('workflow_version', 1)
+    require(type(value) is int and value in (1, 2), 'unsupported workflow_version')
+    return value
+
+
+def check_structure(root, task):
+    checks = task.get('checks', {})
+    require(isinstance(checks, dict), 'checks must be an object')
+    for name, item in checks.items():
+        require(nonempty(name) and isinstance(item, dict) and nonempty(item.get('summary')), 'invalid editorial check')
+        evidence_structure(root, [item])
+
+
+def editorial_errors(root, stage, task):
+    if workflow_version(stage) < 2 or task['status'] == 'not_applicable':
+        return []
+    checks = task.get('checks', {})
+    errors = []
+    references = {item['path']: item['sha256'] for item in task['inputs'] + task['outputs']}
+    for name in EDITORIAL_CHECKS.get(task['kind'], ()):
+        item = checks.get(name)
+        if not item:
+            errors.append('missing editorial check: ' + name)
+        elif references.get(item['path']) != item['sha256']:
+            errors.append('editorial check must reference task evidence: ' + name)
+    return errors
+
+
 def structure(root, data):
     require(isinstance(data, dict) and type(data.get('schema_version')) is int and data['schema_version'] == 1, 'invalid task schema_version')
     stages = data.get('stages')
@@ -139,6 +185,7 @@ def structure(root, data):
         require(stage['id'] not in stage_map, 'duplicate stage id')
         stage_map[stage['id']] = stage
         require(stage.get('workflow') in WORKFLOWS, 'unknown workflow')
+        workflow_version(stage)
         require(stage.get('status') in ('planned', 'active', 'done'), 'invalid stage status')
         chapter = stage.get('chapter')
         require(chapter is None or type(chapter) is int and chapter > 0, 'invalid stage chapter')
@@ -167,6 +214,7 @@ def structure(root, data):
             require(verification is None or isinstance(verification, dict), 'invalid verification')
             evidence_structure(root, task.get('inputs'))
             evidence_structure(root, task.get('outputs'))
+            check_structure(root, task)
         for previous, current in zip(positions, positions[1:]):
             require(tasks[previous]['id'] in tasks[current]['depends_on'], 'core task missing required predecessor: ' + tasks[current]['kind'])
     require(data.get('current_stage') in stage_map, 'invalid current_stage')
@@ -223,24 +271,25 @@ def save(root, data):
     nc.atomic_write(path, text)
 
 
-def new_stage(stage_id, title, workflow, chapter=None, next_stage=None, end_reason=''):
+def new_stage(stage_id, title, workflow, chapter=None, next_stage=None, end_reason='', workflow_version=2):
     require(workflow in WORKFLOWS, 'unknown workflow')
+    require(type(workflow_version) is int and workflow_version in (1, 2), 'unsupported workflow_version')
     tasks = []
     for kind in WORKFLOWS[workflow]:
         title_text, role, acceptance = TASK_DEFAULTS[kind]
         tasks.append(dict(id=stage_id + '.' + kind, kind=kind, title=title_text,
                           role=role,
                           status='todo', depends_on=[tasks[-1]['id']] if tasks else [],
-                          inputs=[], outputs=[], acceptance=acceptance,
+                          inputs=[], outputs=[], checks={}, acceptance=acceptance,
                           verification=None, reason='', history=[], operation_id=''))
-    return dict(id=stage_id, title=title, workflow=workflow, chapter=chapter,
+    return dict(id=stage_id, title=title, workflow=workflow, workflow_version=workflow_version, chapter=chapter,
                 status='planned', next_stage=next_stage, end_reason=end_reason, tasks=tasks)
 
 
-def initialize(book):
+def initialize(book, workflow_version=2):
     with writing(book) as root:
         require(not nc.relative_path(root, TASK_FILE).exists(), 'task ledger already exists')
-        stage = new_stage('S01', '确定方向与验证构思', 'planning')
+        stage = new_stage('S01', '确定方向与验证构思', 'planning', workflow_version=workflow_version)
         stage['status'] = 'active'
         data = dict(schema_version=1, current_stage='S01', current_task=stage['tasks'][0]['id'], stages=[stage])
         save(root, data)
@@ -258,6 +307,8 @@ def plan(book, request):
             require(stage['status'] != 'done', 'closed stages are historical; plan a new revision stage')
             for field in ('workflow', 'chapter'):
                 require(field not in request or request[field] == stage[field], 'cannot change existing ' + field)
+            require('workflow_version' not in request or request['workflow_version'] == workflow_version(stage),
+                    'cannot rewrite historical workflow_version; plan a new stage')
             if any(field in request and request[field] != stage[field] for field in ('next_stage', 'end_reason')):
                 next_plan = selected_task(stage, 'next_plan')
                 if next_plan['status'] in FINISHED:
@@ -271,7 +322,14 @@ def plan(book, request):
                     stage[field] = request[field]
         else:
             require(sum(stage['status'] != 'done' for stage in data['stages']) < 2, 'detail only the current and next stage')
-            stage = new_stage(stage_id, request.get('title'), request.get('workflow'), request.get('chapter'), request.get('next_stage'), request.get('end_reason', ''))
+            if request.get('workflow_version', 2) == 1:
+                require(nonempty(request.get('compatibility_reason')),
+                        'new legacy stage requires compatibility_reason; new work uses workflow v2')
+                require(all(workflow_version(item) == 1 for item in data['stages']),
+                        'workflow v2 books cannot create legacy stages to bypass editorial gates')
+            stage = new_stage(stage_id, request.get('title'), request.get('workflow'), request.get('chapter'), request.get('next_stage'), request.get('end_reason', ''), request.get('workflow_version', 2))
+            if 'compatibility_reason' in request:
+                stage['compatibility_reason'] = request['compatibility_reason']
             data['stages'].append(stage)
         if stage['next_stage']:
             successor = next((item for item in data['stages'] if item['id'] == stage['next_stage']), None)
@@ -293,6 +351,7 @@ def task_validity(root, data, task_map):
         if task['status'] not in FINISHED:
             errors.append('not accepted')
         else:
+            errors.extend(editorial_errors(root, stage, task))
             verification = task['verification']
             if not isinstance(verification, dict) or not all(nonempty(verification.get(k)) for k in ('agent_id', 'source')):
                 errors.append('missing main-agent verification')
@@ -343,15 +402,15 @@ def update(book, request):
             valid = task_validity(root, data, task_map)
             require(all(not valid(dep) for dep in task['depends_on']), 'task prerequisites are incomplete or stale')
         changed_acceptance = task['status'] in FINISHED and status in FINISHED and any(
-            field in request and request[field] != task[field]
-            for field in ('inputs', 'outputs', 'reason', 'operation_id'))
+            field in request and request[field] != task.get(field, {})
+            for field in ('inputs', 'outputs', 'checks', 'reason', 'operation_id'))
         if changed_acceptance:
             verification = request.get('verification')
             require(isinstance(verification, dict) and all(nonempty(verification.get(key)) for key in ('agent_id', 'source')),
                     'changed accepted evidence requires new main-agent verification')
         archive(task, 'update')
         reopened = task['status'] in FINISHED and status not in FINISHED
-        for field in ('inputs', 'outputs', 'verification', 'reason', 'operation_id'):
+        for field in ('inputs', 'outputs', 'checks', 'verification', 'reason', 'operation_id'):
             if field in request:
                 task[field] = copy.deepcopy(request[field])
         task['status'] = status
@@ -371,6 +430,12 @@ def update(book, request):
                             downstream['status'] = 'todo'
                             downstream['verification'] = None
         structure(root, data)
+        if status == 'submitted':
+            require(bool(task['outputs']), 'submitted task needs output evidence')
+            for item in task['inputs'] + task['outputs']:
+                path = nc.relative_path(root, item['path'])
+                require(path.is_file() and nc.digest(path) == item['sha256'], 'stale submitted evidence: ' + item['path'])
+            require(not editorial_errors(root, stage, task), '; '.join(editorial_errors(root, stage, task)))
         if status in FINISHED:
             errors = task_validity(root, data, task_map)(task['id'])
             require(not errors, 'task cannot be accepted: ' + '; '.join(errors))
@@ -378,6 +443,33 @@ def update(book, request):
         data['current_task'] = next((item['id'] for item in stage['tasks'] if item['status'] not in FINISHED), '')
         save(root, data)
         return dict(ok=True, stage=stage['id'], task=task['id'], status=status)
+
+
+def submit(book, request):
+    require(isinstance(request, dict), 'submit request must be an object')
+    require('status' not in request or request['status'] == 'submitted', 'submit never accepts tasks')
+    return update(book, dict(request, status='submitted'))
+
+
+def artifact_warnings(root, data):
+    """Heuristics locate unregistered files; existence never proves completion."""
+    registered = set()
+    for stage in data['stages']:
+        for task in stage['tasks']:
+            for record in [task] + task.get('history', []):
+                for item in record.get('inputs', []) + record.get('outputs', []):
+                    registered.add((item['path'], item['sha256']))
+    warnings = []
+    for folder in ('草稿与备选', '审稿与修订'):
+        directory = root / folder
+        if not directory.exists():
+            continue
+        for path in sorted(directory.rglob('*')):
+            if path.is_file() and re.search(r'第\d+章.*(?:草稿|首读|评审|复核|修订)', path.name):
+                relative = path.relative_to(root).as_posix()
+                if (relative, nc.digest(path)) not in registered:
+                    warnings.append('unregistered artifact (inspect before resuming): ' + relative)
+    return warnings
 
 
 def render(book):
@@ -403,12 +495,27 @@ def check(book, stage=None):
             valid = task_validity(root, data, task_map)
             for task in selected['tasks']:
                 errors = valid(task['id']) if task['status'] in FINISHED else [dep + ': invalid dependency' for dep in task['depends_on'] if valid(dep)] if task['status'] in ('doing', 'submitted') else []
+                if task['status'] == 'submitted':
+                    errors.extend(editorial_errors(root, selected, task))
+                    if not task['outputs']:
+                        errors.append('submitted task needs output evidence')
+                    for item in task['inputs'] + task['outputs']:
+                        path = nc.relative_path(root, item['path'])
+                        if not path.is_file() or nc.digest(path) != item['sha256']:
+                            errors.append('stale submitted evidence: ' + item['path'])
                 if errors:
                     stale.append(task['id'])
                     issues.append(task['id'] + ': ' + '; '.join(errors))
             if selected['status'] == 'done' and any(task['status'] not in FINISHED for task in selected['tasks']):
                 issues.append('closed stage has unaccepted tasks')
-            result = dict(ok=not issues, enabled=True, stage=selected['id'], issues=issues, stale_tasks=stale)
+            current = stages[data['current_stage']]
+            expected_cursor = next((task['id'] for task in current['tasks'] if task['status'] not in FINISHED), '')
+            if data['current_task'] != expected_cursor:
+                issues.append('task cursor differs from actual accepted/submitted tasks')
+            result = dict(ok=not issues, enabled=True, stage=selected['id'], issues=issues, stale_tasks=stale,
+                          warnings=artifact_warnings(root, data),
+                          resume=dict(stage=data['current_stage'], task=data['current_task'],
+                                      note='Use this ledger cursor; inspect unregistered artifacts before repeating work.'))
         return result
     except (ValueError, OSError, TypeError, KeyError, AttributeError) as exc:
         return dict(ok=False, enabled=True, issues=[str(exc)], stale_tasks=stale)
@@ -479,6 +586,15 @@ def require_adoption(book, request):
         require(evidence_covers(recheck['inputs'], {draft: sha}), 'recheck inputs do not cover current draft')
         reviews = {path: nc.digest(nc.relative_path(root, path)) for path in request.get('reviews', [])}
         require(bool(reviews) and evidence_covers(recheck['outputs'], reviews), 'recheck outputs do not cover current reviews')
+        if workflow_version(stage) >= 2:
+            for path in reviews:
+                review = json.loads(nc.relative_path(root, path).read_text(encoding='utf-8-sig'))
+                require(review.get('schema_version') == 2, 'workflow v2 requires review schema_version 2')
+            prose = request.get('prose_check')
+            require(isinstance(prose, dict), 'workflow v2 requires prose_check report evidence')
+            evidence_structure(root, [prose])
+            require(evidence_covers(recheck['outputs'], {prose['path']: prose['sha256']}),
+                    'recheck outputs do not cover prose_check report')
         return stage['id']
 
 
@@ -511,10 +627,10 @@ def require_finalization(book, record):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     subs = parser.add_subparsers(dest='command', required=True)
-    for command in ('init', 'plan', 'update', 'render', 'check', 'gate', 'close'):
+    for command in ('init', 'plan', 'update', 'submit', 'render', 'check', 'gate', 'close'):
         sub = subs.add_parser(command)
         sub.add_argument('--book', required=True)
-        if command in ('plan', 'update'):
+        if command in ('plan', 'update', 'submit'):
             sub.add_argument('--request', required=True)
         if command in ('check', 'gate', 'close'):
             sub.add_argument('--stage', required=command != 'check')
@@ -522,7 +638,7 @@ def main(argv=None):
             sub.add_argument('--before', required=True)
     args = parser.parse_args(argv)
     try:
-        if args.command in ('plan', 'update'):
+        if args.command in ('plan', 'update', 'submit'):
             raw = args.request
             request = json.loads(raw) if raw.lstrip().startswith('{') else json.loads(Path(raw[1:] if raw.startswith('@') else raw).read_text(encoding='utf-8'))
             result = globals()[args.command](args.book, request)

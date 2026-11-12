@@ -1,6 +1,6 @@
 # 文件、版本与交接协议
 
-本协议版本为 1。脚本是文件可靠性辅助工具，不能证明小说好、子 agent 身份真实或作者确实同意。主 agent 仍须对照宿主派工结果与用户原话验收；文件管理脚本的写命令由资料子 agent 执行，正文创作与修改仍由创作子 agent 承担。
+本协议为 v2 编辑验收补充；作品状态和账本外层仍保留 `schema_version: 1`，新任务阶段默认 `workflow_version: 2`，新阶段的章节评审使用独立的 `schema_version: 2`。旧记录保持可读，不补造历史。脚本不能证明小说好、子 agent 身份真实或作者确实同意；主 agent 仍须对照宿主记录和作者原话验收，文件管理写命令由资料子 agent 执行，正文由创作子 agent 承担。
 
 ## 1. 目录与命名
 
@@ -79,6 +79,69 @@ python "$SKILL/scripts/chapterctl.py" --help
 变化记录的 `categories` 使用脚本约定的英文键，值为 `updated` 或 `unchanged`；`pending` 不能关闭操作。每次采用后 `summaries`、`history`、`indexes`、`handoff` 四项必须为 `updated`，其余类别按实际变化判断。`checked_sources` 列实际核对文件，`updated_files` 列已更新文件及其哈希，`category_files` 将每个 `updated` 类别关联到这些文件，`handoff` 指明接续文件和章号；接续正文至少出现 `第1章`、零填充的 `第0001章` 或完整正式章文件名中的一种，章号须对应本次采用。这是机械证据入口，资料内容是否充分仍由主 agent 抽查、必要时派子 agent 复核。索引刷新后再计算受影响文件哈希；不要把不断变化的状态文件或变化记录自身列入自身哈希清单。
 
 共同门槛：当前稿哈希与评审一致，实际写作者与评审者不同，文学与连贯性覆盖齐全，无未解决硬冲突，作者授权对应版本，新建不覆盖已有文件，替换时旧哈希匹配。评审问题的 `severity` 为 `hard`、`soft` 或 `info`，`status` 为 `open`、`resolved` 或 `waived`，硬冲突只能 `resolved` 后采用。全部采用记录可追溯。文件中的 ID 只是申报，主 agent 必须对照真实宿主记录，不能凭不同字符串认定存在独立 agent。
+
+### v2 当前稿评审与问题处理
+
+v2 阶段采用必须使用评审 `schema_version: 2`。保留 `writer_task`、`reviewer`、`draft_sha256`、`coverage`（仅 `literary/continuity`）、`verdict` 与 `issues`，新增以下明确版本证据：
+
+```json
+{
+  "schema_version": 2,
+  "writer_task": "真实写作任务",
+  "reviewer": {"task_id": "真实复核任务", "agent_id": "真实独立评审者"},
+  "draft_sha256": "当前正文SHA-256",
+  "reviewed_draft": {"path": "草稿与备选/当前章稿.md", "sha256": "当前正文SHA-256"},
+  "current_draft": {"path": "草稿与备选/当前章稿.md", "sha256": "当前正文SHA-256"},
+  "reading": {"mode": "full", "scope": "实际阅读全文范围及必要前文、阅读限制"},
+  "report": {"path": "审稿与修订/当前章复核.md", "sha256": "实际报告SHA-256"},
+  "coverage": ["literary", "continuity"],
+  "verdict": "pass",
+  "issues": []
+}
+```
+
+两个稿件指针须相同并对应当前真实稿，报告须真实存在、非空且绑定哈希。它们表示本次新结论覆盖当前版本，不能用换哈希把 v2 阅读伪装成 v3 阅读。旧 schema 1 仍兼容，但显式 `version_scope.verdict_version` 与 `adopted_version` 的 `vN` 不同会被拒绝；程序不解析自由叙述来认证阅读，主 agent 须核对实际报告和宿主记录。
+
+小改可以 `reading.mode: incremental`，由独立评审者提交新报告，并补充：
+
+- `base_review: {path, sha256}`：旧稿完整阅读且通过的 schema 2 评审，覆盖文学与连贯性；不能只有摘要或局部检查。
+- `base_draft: {path, sha256}`：该基准所评的不可变旧稿，写作任务对应一致。
+- `change_map: {path, sha256}`：独立 JSON 文件，含 `old_draft`、`new_draft` 两个指针、非空 `summary` 及 `diff`；`diff` 须与 `chapterctl.draft_diff` 对实际新旧稿产生的 unified diff 一致，由机械命令生成，不能让模型凭印象抄写。关联影响另写入报告。
+- `reading.scope`：实际补读的改动；`reading.related_scope`：实际核查的关联范围及沿用旧结论的依据。
+
+基准、旧稿和变化映射均保留且可核对，新报告不能复用基准报告的路径或内容哈希。连续小改可相对最后一次完整基准汇总变化；无法界定影响时重新全文阅读。当前增量接口要求新旧评审的 `writer_task` 相同；更换写作任务或写作者的修订须完整阅读，不能伪用旧任务身份来通过校验。主 agent 的 diff 核验不能代替独立评审的新报告，增量复核也不冒充新读者盲读。
+
+用以下只读命令生成 `change_map` 的 JSON 内容，再由资料子 agent 保存为新文件并登记其哈希；该命令不修改稿件：
+
+```bash
+python "$SKILL/scripts/chapterctl.py" diff --book "$BOOK" --old 草稿与备选/章稿-v2.md --new 草稿与备选/章稿-v3.md --summary "实际变更摘要"
+```
+
+schema 2 中每个问题增加 `priority: major|optional`，与 `severity` 分开：`major` 表示影响主要阅读目标，需要处理或有依据地保留；`optional` 是可选审美。`major/open` 不得采用，`major/waived` 须有 `retention_reason`（阅读代价与保留理由）、`retention_evidence: {path,sha256}` 及 `retention_authorization: {source,scope}`（作者决定或既有授权范围）。`hard` 仍只能 `resolved`；不能通过改成 optional 或借作者批准假装事实矛盾消失。脚本校验字段和证据，归类与取舍是否合理仍由主 agent 对照文本、真实目标核验。
+
+### 正文机械检查及采用绑定
+
+从作者约定提取 `创作约定/正文检查规则-v1.json` 等带版本的执行文件；它是执行摘录，作者约定仍是权威来源。`prepare.checks.prose_policy` 绑定该文件的路径与哈希，主 agent 核对摘录与约定一致。已被采用章引用的规则、报告与基准文件保持不可变；新约定另存新版本，不原地覆盖以免破坏旧章证据。最小配置示例：
+
+```json
+{
+  "quote_style": "chinese_double",
+  "quote_confirmed": false,
+  "chapter_length": {"count_by": "han"}
+}
+```
+
+所有键可省略；`quote_style` 支持 `chinese_double/corner/unspecified`，默认双引号建议不是作者确认。`quote_confirmed` 只有真实明确约定时才设 true。`chapter_length` 可有非负整数 `target_min`、`target_max`、`hard_max`，目标与硬上限不得矛盾；`count_by` 为 `han` 或 `non_whitespace`。只有明确硬上限才能填 `hard_max`，不把建议篇幅升级成阻断规则。未知键或无效配置拒绝执行，变更规则需重开准备及受影响任务。
+
+```bash
+python "$SKILL/scripts/prosecheck.py" check --book "$BOOK" --file 草稿与备选/当前章稿.md --policy 创作约定/正文检查规则-v1.json
+```
+
+有 `--book` 时，`--file/--policy` 均为作品内规范相对路径，输出 `{draft_sha256,policy:{path,sha256},result}`；不带 `--book` 可检查普通文件，直接返回 `result`。脚本只向标准输出写 JSON，不保存或修改文件；由资料子 agent 保存报告并登记哈希。`result` 含 `ok`、正文计数、规范化 `policy` 和 `findings`，每项有等级、代码、原文行列与说明。退出码 0 为无机械 error、1 为发现 error、2 为配置或读取失败；warning 仍须评审处理。
+
+统计排除 HTML 注释、Markdown 标题和可识别的中文章／节标题，保留原文位置；不常见排版由评审核对。引号错序／不配对和明确硬上限是 error；默认风格及不确定引用用途是 warning。已确认引号约定且启发规则识别直接对白时，外层不符才升 error；其余疑点仍需人工判断。合法内层引语及跨段续开保留；续开附近存在明确说话标签时给 warning，交人工核对说话人与前段闭合，不全局替换。省略号、破折号、软篇幅目标只提示；结果不评文学质量，也不保证检测到所有对白。
+
+v2 采用请求增加 `prose_check: {path,sha256}` 指向完整报告，报告同时列入 `recheck.outputs`。采用命令读取准备阶段已验收的 policy，对当前原字节稿件重新计算并比较，存在 error、旧稿／旧规则或报告不一致时拒绝采用。不能只填 `ok:true` 或在采用请求中临时关闭规则。正式章节条目保存本次 `workflow_version`、`prose_policy` 与 `prose_check` 的固定引用；`finish` 及后续章节／全书检查继续核验原规则、报告和正式正文，不能采用后篡改报告来规避门槛。
 
 采用后“待同步”不等于完成。变化记录要覆盖意图、人物、成长、关系、世界、故事线、事件、线索、知情、资源、曲线、节奏、摘要、历史、索引、交接；状态可为已更新、检查无变化、待处理。未完成项须保留，不能删除 pending 来伪造完成。
 

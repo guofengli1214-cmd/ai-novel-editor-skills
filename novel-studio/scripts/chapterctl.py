@@ -7,7 +7,7 @@ Host MUST independently compare actual writer/reviewer agent identities: JSON
 identities and authorizations are assertions, not authenticated credentials.
 
 adopt: {number,target,draft,expected_sha256,writer:{task_id,agent_id},reviews:[],
-authorization:{mode,source,approved_sha256?},change_record,task_stage?}. Modes: per_chapter,
+authorization:{mode,source,approved_sha256?},change_record,task_stage?,prose_check?}. Modes: per_chapter,
 trial (approved_sha256 required), continuous; Chinese aliases 逐章/试写/连续.
 source is a nonempty authorization provenance string. Paths are book-relative.
 Managed books require taskctl adoption/synchronization gates. task_stage selects
@@ -15,6 +15,15 @@ the current chapter/trial stage; otherwise taskctl matches it by chapter number.
 Review: {schema_version:1,writer_task,reviewer:{task_id,agent_id},draft_sha256,
 coverage:[literary,continuity],verdict:pass|revise|blocked,
 issues:[{id,severity,description,evidence,status}]}. severity=hard|soft|info; status=open|resolved|waived; hard requires resolved.
+New workflow-v2 stages require review schema 2: reviewed_draft/current_draft
+{path,sha256}, reading {mode:full|incremental,scope}, report {path,sha256}, and
+issue priority major|optional. Major retention needs authorization, reason and
+evidence. Incremental reading needs a full schema-2 baseline, actual change map
+and a new reading report; different writer tasks require a full current read.
+prose_check {path,sha256} binds the exact result recomputed with the prepared
+policy. Adopted v2 chapters retain fixed policy/report evidence for later check.
+diff --book DIR --old REL --new REL --summary TEXT prints a canonical change-map
+JSON without writing files. See references/task-management.md and file-protocol.md.
 finish: {operation_id}. The adopt change_record JSON must contain draft_sha256,
 categories (all CATEGORIES: updated|unchanged; pending is rejected;
 summaries/history/indexes/handoff MUST be updated after every adoption),
@@ -59,6 +68,7 @@ change_record: {"draft_sha256":"H","categories":{"intent":"unchanged",
 """
 import argparse
 from contextlib import contextmanager
+import difflib
 import hashlib
 import json
 import os
@@ -89,7 +99,7 @@ def nonempty(value):
 
 
 def read_json(path):
-    return obj(json.loads(path.read_text(encoding='utf-8')))
+    return obj(json.loads(path.read_text(encoding='utf-8-sig')))
 
 
 def save(path, value):
@@ -255,6 +265,92 @@ def unlock(book, request):
         recovery.rmdir()
 
 
+def evidence_file(root, value, label):
+    value = obj(value)
+    require(nonempty(value.get('path')) and isinstance(value.get('sha256'), str)
+            and re.fullmatch('[0-9a-f]{64}', value['sha256']), 'invalid ' + label + ' evidence')
+    path = file_path(root, value['path'])
+    require(bool(path.read_bytes().strip()), 'empty ' + label + ' evidence')
+    require(nc.digest(path) == value['sha256'], 'stale ' + label + ' evidence')
+    return path
+
+
+def legacy_scope_consistent(review):
+    """Only compare explicit version fields, never claim to parse prose."""
+    scope = review.get('version_scope')
+    if isinstance(scope, dict):
+        reviewed, current = scope.get('verdict_version'), scope.get('adopted_version')
+        if nonempty(reviewed) and nonempty(current):
+            old = re.search(r'\bv\d+\b', reviewed, re.I)
+            new = re.search(r'\bv\d+\b', current, re.I)
+            require(not (old and new) or old.group().lower() == new.group().lower(),
+                    'review version_scope contradicts adopted version; independent current review required')
+
+
+def draft_diff(root, old, current):
+    """Canonical diff binds the change map to the actual old and new bytes."""
+    old_text = file_path(root, old['path']).read_bytes().decode('utf-8')
+    new_text = file_path(root, current['path']).read_bytes().decode('utf-8')
+    return ''.join(difflib.unified_diff(old_text.splitlines(keepends=True), new_text.splitlines(keepends=True),
+                                       fromfile=old['path'], tofile=current['path'], lineterm='\n'))
+
+
+def change_map(book, old, new, summary):
+    import taskctl
+    require(nonempty(summary), 'change map requires a summary')
+    with taskctl.reading(book) as root:
+        old_path, new_path = file_path(root, old), file_path(root, new)
+        baseline = dict(path=old, sha256=nc.digest(old_path))
+        current = dict(path=new, sha256=nc.digest(new_path))
+        return dict(old_draft=baseline, new_draft=current, summary=summary,
+                    diff=draft_diff(root, baseline, current))
+
+
+def validate_review_scope(root, review, sha, seen, writer):
+    reviewed = obj(review.get('reviewed_draft'))
+    current = obj(review.get('current_draft'))
+    evidence_file(root, reviewed, 'reviewed draft')
+    evidence_file(root, current, 'current draft')
+    require(reviewed == current and current['sha256'] == sha,
+            'reviewed/current draft must both identify the current version')
+    report = obj(review.get('report'))
+    evidence_file(root, report, 'reading report')
+    require(report['path'] not in (reviewed['path'], current['path']), 'reading report cannot be the draft')
+    reading = obj(review.get('reading'))
+    require(reading.get('mode') in ('full', 'incremental') and nonempty(reading.get('scope')),
+            'review requires explicit reading mode and scope')
+    if reading['mode'] == 'incremental':
+        base_ref = obj(review.get('base_review'))
+        base_path = evidence_file(root, base_ref, 'base review')
+        require(base_ref['path'] not in seen, 'cyclic review provenance')
+        base = read_json(base_path)
+        require(base.get('schema_version') == 2 and obj(base.get('reading')).get('mode') == 'full',
+                'incremental review needs a schema 2 complete-reading baseline')
+        baseline = obj(review.get('base_draft'))
+        evidence_file(root, baseline, 'base draft')
+        require(baseline.get('sha256') != sha, 'incremental review requires different old and new versions')
+        require(base.get('draft_sha256') == baseline.get('sha256') and base.get('current_draft') == baseline,
+                'incremental baseline version mismatch')
+        require(base.get('writer_task') == review.get('writer_task'), 'incremental baseline writer task mismatch')
+        identity = obj(base.get('reviewer'))
+        require(nonempty(identity.get('task_id')) and nonempty(identity.get('agent_id')), 'missing baseline reviewer')
+        require(base.get('verdict') == 'pass', 'incremental baseline was not passed')
+        validate_reviews(root, [base_ref['path']], writer, baseline['sha256'])
+        change = obj(review.get('change_map'))
+        change_path = evidence_file(root, change, 'change map')
+        require(change['path'] not in (report['path'], base_ref['path'], reviewed['path'], baseline['path']),
+                'change map must be a separate evidence document')
+        mapping = read_json(change_path)
+        require(mapping.get('old_draft') == baseline and mapping.get('new_draft') == current,
+                'change map does not bind old and new versions')
+        require(mapping.get('diff') == draft_diff(root, baseline, current),
+                'change map diff does not match actual old and new drafts')
+        require(nonempty(mapping.get('summary')) and nonempty(reading.get('related_scope')),
+                'incremental review needs change summary and related reading scope')
+        require(report['path'] != obj(base.get('report')).get('path') and report['sha256'] != base['report']['sha256'],
+                'incremental review requires a new reviewer report')
+
+
 def validate_reviews(root, reviews, writer, sha):
     obj(writer)
     require(all(nonempty(writer.get(k)) for k in ('task_id', 'agent_id')), 'invalid writer identity')
@@ -262,12 +358,15 @@ def validate_reviews(root, reviews, writer, sha):
     coverage, reviewers = set(), []
     for name in reviews:
         review = read_json(file_path(root, name))
-        require(type(review.get('schema_version')) is int and review['schema_version'] == 1, 'review schema_version')
+        require(type(review.get('schema_version')) is int and review['schema_version'] in (1, 2), 'review schema_version')
         identity = obj(review.get('reviewer'))
         require(all(nonempty(identity.get(k)) for k in ('task_id', 'agent_id')), 'invalid reviewer identity')
         require(identity['agent_id'] != writer['agent_id'] and identity['task_id'] != writer['task_id'], 'writer cannot review own draft')
         require(review.get('writer_task') == writer['task_id'] and review.get('draft_sha256') == sha, 'stale review')
         require(review.get('verdict') == 'pass', 'review not pass')
+        legacy_scope_consistent(review)
+        if review['schema_version'] == 2:
+            validate_review_scope(root, review, sha, {name}, writer)
         areas = review.get('coverage')
         require(isinstance(areas, list) and all(a in ('literary', 'continuity') for a in areas), 'invalid coverage')
         coverage.update(areas)
@@ -279,9 +378,45 @@ def validate_reviews(root, reviews, writer, sha):
             require(issue['severity'] in ('hard', 'soft', 'info'), 'unknown issue severity')
             require(issue['status'] in ('open', 'resolved', 'waived'), 'unknown issue status')
             require(issue['severity'] != 'hard' or issue['status'] == 'resolved', 'unresolved hard issue')
+            if review['schema_version'] == 2:
+                require(issue.get('priority') in ('major', 'optional'), 'schema 2 issues require major/optional priority')
+                if issue['priority'] == 'major':
+                    require(issue['status'] in ('resolved', 'waived'), 'unresolved major reading issue')
+                    if issue['status'] == 'waived':
+                        authorization = obj(issue.get('retention_authorization'))
+                        require(nonempty(authorization.get('source')) and nonempty(authorization.get('scope')),
+                                'major issue retention requires author authorization provenance')
+                        require(nonempty(issue.get('retention_reason')),
+                                'major issue retention requires a reading-impact reason')
+                        evidence_file(root, issue.get('retention_evidence'), 'major issue retention')
         reviewers.append(identity)
     require(coverage == {'literary', 'continuity'}, 'missing literary/continuity coverage')
     return reviewers
+
+
+def validate_prose_check(root, req, sha, stage_id):
+    import taskctl
+    if stage_id is None:
+        return
+    data = taskctl.load_plan(root)
+    stage = next(stage for stage in data['stages'] if stage['id'] == stage_id)
+    if taskctl.workflow_version(stage) < 2:
+        return
+    prepared = taskctl.selected_task(stage, 'prepare')['checks']['prose_policy']
+    policy = {key: prepared[key] for key in ('path', 'sha256')}
+    report_ref = obj(req.get('prose_check'))
+    validate_prose_evidence(root, req['draft'], sha, policy, report_ref)
+    return policy
+
+
+def validate_prose_evidence(root, draft, sha, policy, report_ref):
+    policy_path = evidence_file(root, policy, 'prepared prose policy')
+    report = read_json(evidence_file(root, report_ref, 'prose check report'))
+    import prosecheck
+    result = prosecheck.check_text(file_path(root, draft).read_bytes().decode('utf-8'), read_json(policy_path))
+    require(report == dict(draft_sha256=sha, policy=policy, result=result),
+            'prose_check report differs from current draft/policy/recomputed result')
+    require(result['ok'], 'current prose violates confirmed mechanical policy')
 
 
 def adopt(book, request):
@@ -325,8 +460,11 @@ def _adopt(root, req):
     require(record != target and record != root / nc.STATE and record != draft and req['change_record'] not in reviews, 'change_record conflicts with evidence')
     import taskctl
     task_stage = taskctl.require_adoption(root, req)
+    prose_policy = validate_prose_check(root, req, sha, task_stage)
     if task_stage is not None:
         req['task_stage'] = task_stage
+        stages = taskctl.load_plan(root)['stages']
+        req['workflow_version'] = taskctl.workflow_version(next(stage for stage in stages if stage['id'] == task_stage))
     operation = uuid.uuid4().hex
     backup_rel = '历史版本/chapter-' + operation
     backup = nc.relative_path(root, backup_rel)
@@ -356,6 +494,10 @@ def _adopt(root, req):
                  review_hashes=pending['review_hashes'])
     if task_stage is not None:
         entry['task_stage'] = task_stage
+        entry['workflow_version'] = req['workflow_version']
+        if req['workflow_version'] >= 2:
+            entry['prose_check'] = req['prose_check']
+            entry['prose_policy'] = prose_policy
     state['chapters'] = [c for c in state['chapters'] if c['number'] != number] + [entry]
     state['chapters'].sort(key=lambda c: c['number'])
     pending['phase'] = 'adopted'
@@ -378,6 +520,8 @@ def finish(book, request):
         require(nc.digest(file_path(root, p['target'])) == p['draft_sha256'], 'chapter hash mismatch')
         req = p['request']
         validate_reviews(root, req['reviews'], req['writer'], p['draft_sha256'])
+        if ch.get('workflow_version', 1) >= 2:
+            validate_prose_evidence(root, ch['path'], ch['sha256'], ch.get('prose_policy'), ch.get('prose_check'))
         require(all(nc.digest(file_path(root, name)) == sha for name, sha in p['review_hashes'].items()), 'review changed after adoption')
         record = read_json(file_path(root, req['change_record']))
         require(record.get('draft_sha256') == p['draft_sha256'], 'change record hash mismatch')
@@ -436,6 +580,10 @@ def check(book, *, verify_snapshots=True):
                 hashes = ch.get('review_hashes')
                 require(isinstance(hashes, dict) and set(hashes) == set(reviews), 'missing review hashes')
                 require(all(nc.digest(file_path(root, name)) == sha for name, sha in hashes.items()), 'review changed after adoption')
+                if ch.get('workflow_version', 1) >= 2:
+                    require(all(read_json(file_path(root, name)).get('schema_version') == 2 for name in reviews),
+                            'workflow v2 chapter requires review schema_version 2')
+                    validate_prose_evidence(root, ch['path'], ch['sha256'], ch.get('prose_policy'), ch.get('prose_check'))
             except (ValueError, OSError, TypeError, KeyError) as exc:
                 issues.append('chapter ' + str(ch['number']) + ': ' + str(exc))
     except (ValueError, OSError, TypeError, KeyError) as exc:
@@ -447,15 +595,22 @@ def check(book, *, verify_snapshots=True):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     subs = parser.add_subparsers(dest='command', required=True)
-    for command in ('adopt', 'finish', 'check', 'unlock'):
+    for command in ('adopt', 'finish', 'check', 'unlock', 'diff'):
         sub = subs.add_parser(command)
         sub.add_argument('--book', required=True)
-        if command != 'check':
+        if command == 'diff':
+            sub.add_argument('--old', required=True, help='book-relative baseline draft')
+            sub.add_argument('--new', required=True, help='book-relative current draft')
+            sub.add_argument('--summary', required=True)
+        elif command != 'check':
             sub.add_argument('--request', required=True, help='inline JSON, JSON-file path, or @JSON-file')
         else:
             sub.add_argument('--skip-snapshots', action='store_true', help='skip immutable snapshot payload verification (read-only quick check)')
     args = parser.parse_args(argv)
     try:
+        if args.command == 'diff':
+            print(json.dumps(change_map(args.book, args.old, args.new, args.summary), ensure_ascii=False))
+            return 0
         if args.command == 'check':
             result = check(args.book, verify_snapshots=not args.skip_snapshots)
         else:

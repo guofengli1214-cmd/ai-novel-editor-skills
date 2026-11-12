@@ -19,6 +19,11 @@ class TaskIntegrationTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.parent = Path(self.temp.name)
         self.book = nc.init_book(self.parent, '任务集成夹具')
+        # This class exercises the original v1 contract explicitly. The v2
+        # success/failure chain lives in test_editorial_gates.py.
+        data = tc.load_plan(self.book)
+        data['stages'][0]['workflow_version'] = 1
+        tc.save(self.book, data)
         self.write('草稿与备选/第一章.md', '仅用于机械测试的正文夹具。')
         self.sha = nc.digest(self.book / '草稿与备选/第一章.md')
         self.write('审稿与修订/任务依据.md', '测试夹具：任务完成依据，不是真实文学评价。')
@@ -55,7 +60,8 @@ class TaskIntegrationTests(unittest.TestCase):
         return tc.update(self.book, request)
 
     def prepare_chapter(self):
-        tc.plan(self.book, dict(id='S02', title='第一章夹具', workflow='chapter', chapter=1))
+        tc.plan(self.book, dict(id='S02', title='第一章夹具', workflow='chapter', chapter=1, workflow_version=1,
+                                compatibility_reason='原v1采用集成回归夹具'))
         self.done('S01', 'direction')
         self.done('S01', 'concept')
         tc.plan(self.book, dict(id='S01', next_stage='S02'))
@@ -201,7 +207,8 @@ class TaskIntegrationTests(unittest.TestCase):
 
     def test_finalization_needs_whole_tasks_but_manifest_and_export_do_not(self):
         self.complete_chapter()
-        tc.plan(self.book, dict(id='S03', title='全书夹具验收', workflow='finalization'))
+        tc.plan(self.book, dict(id='S03', title='全书夹具验收', workflow='finalization', workflow_version=1,
+                                compatibility_reason='原v1全书定稿集成回归夹具'))
         tc.plan(self.book, dict(id='S02', next_stage='S03'))
         self.done('S02', 'next_plan')
         tc.close_stage(self.book, 'S02')

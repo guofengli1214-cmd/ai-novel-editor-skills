@@ -18,7 +18,7 @@ class TaskTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = nc.init_book(Path(self.temp.name), '任务夹具', task_management=False)
-        tc.initialize(self.root)
+        tc.initialize(self.root, workflow_version=1)
         self.write('审稿与修订/验收依据.md', '测试夹具，不是真实子 agent 或文学质量证据。')
 
     def write(self, path, text):
@@ -46,7 +46,8 @@ class TaskTests(unittest.TestCase):
             self.write(tc.TASK_FILE, text.replace(old_json, json.dumps(data, ensure_ascii=False, indent=2), 1))
 
     def chapter_stage(self, workflow='chapter'):
-        tc.plan(self.root, dict(id='S02', title='首章', workflow=workflow, chapter=1))
+        tc.plan(self.root, dict(id='S02', title='首章', workflow=workflow, chapter=1, workflow_version=1,
+                                compatibility_reason='原v1机械账本回归夹具'))
         self.done('direction')
         self.done('concept')
         tc.plan(self.root, dict(id='S01', next_stage='S02'))
