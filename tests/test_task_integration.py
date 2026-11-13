@@ -26,6 +26,7 @@ class TaskIntegrationTests(unittest.TestCase):
         data['stages'][0].pop('direction_gate_version', None)
         data['stages'][0].pop('decision_gate_version', None)
         data['stages'][0].pop('execution_gate_version', None)
+        data['stages'][0].pop('result_gate_version', None)
         tc.save(self.book, data)
         self.write('草稿与备选/第一章.md', '仅用于机械测试的正文夹具。')
         self.sha = nc.digest(self.book / '草稿与备选/第一章.md')

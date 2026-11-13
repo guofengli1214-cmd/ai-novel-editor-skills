@@ -60,6 +60,7 @@ class AuthorIntakeTests(unittest.TestCase):
         stage.pop('direction_gate_version', None)
         stage.pop('decision_gate_version', None)
         stage.pop('execution_gate_version', None)
+        stage.pop('result_gate_version', None)
         if version is None:
             stage.pop('workflow_version', None)
         else:

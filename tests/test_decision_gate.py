@@ -66,7 +66,11 @@ class DecisionGateTests(unittest.TestCase):
         for workflow in tc.WORKFLOWS:
             with self.subTest(workflow=workflow):
                 self.assertEqual(tc.new_stage('S1', '合成阶段', workflow, chapter=1)['decision_gate_version'], 1)
-                self.assertNotIn('decision_gate_version', tc.new_stage('S1', '旧阶段', workflow, chapter=1, workflow_version=1))
+                if workflow in tc.STANDALONE_WORKFLOWS:
+                    with self.assertRaisesRegex(ValueError, 'standalone workflows require workflow v2'):
+                        tc.new_stage('S1', '旧阶段', workflow, chapter=1, workflow_version=1)
+                else:
+                    self.assertNotIn('decision_gate_version', tc.new_stage('S1', '旧阶段', workflow, chapter=1, workflow_version=1))
         data = tc.load_plan(self.root)
         data['stages'][0].pop('decision_gate_version')
         tc.save(self.root, data)

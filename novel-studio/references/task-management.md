@@ -20,12 +20,20 @@
 
 | 工作流 | 必做步骤，按依赖顺序 |
 | --- | --- |
+| `materials`：仅整理既有资料 | `scope` 本轮授权与输入／输出范围 → `organize` 整理及来源核对 → `next_plan` 接续或真实终点 |
+| `review_only`：只读审稿 | `scope` 本轮授权与输入／输出范围 → `read_only_review` 独立阅读及审稿报告 → `next_plan` 接续或真实终点 |
 | `planning`：方向与构思 | `direction` 方向与授权 → `concept` 构思验证 → `next_plan` 后续计划 |
 | `chapter`：写章或改章 | `prepare` 写前准备 → `draft` 草稿 → `first_read` 首轮阅读 → `review` 资料与连贯性核查 → `revise` 意见处理 → `recheck` 当前稿复核 → `adopt` 正式采用 → `sync` 资料同步 → `next_plan` 后续计划 |
-| `trial`：开书或风格实验 | 在 `chapter` 的 `prepare` 与 `draft` 之间增加 `voice_trial` 同场景叙述方案比较；遵守已有视角及授权 |
+| `trial`：开书或风格实验 | 在 `chapter` 的 `prepare` 与 `draft` 之间增加 `voice_trial` 同场景候选对照；再按下文追加匿名阅读与作者选声节点，遵守已有视角及授权 |
 | `finalization`：全书定稿 | `whole_read` 整体阅读 → `structural_revision` 结构意见处理 → `whole_recheck` 全稿复核 → `finalize` 定稿验收 → `next_plan` 后续安排 |
 
 任务可合并承接一次实际派工的多个产物，执行记录分别引用证据，不要求每个任务新开一个 agent。任务依赖表示交付物已被验收，不能只凭派工已发出就进入下一步。`depends_on` 只引用同阶段任务；跨阶段通过关闭阶段、`next_stage` 和输入版本衔接，避免当前任务等待尚不可执行的未来阶段。额外条件或并行任务可增加到同一数据区，列清依赖；不得反向影响首读隔离。
+
+### 独立整理与只读审稿
+
+仅整理作者已有材料使用 `materials`，仅审查既有稿件使用 `review_only`，无需先完成创作方向访谈，不强制补设定、改稿或正式采用。`scope.checks.authorization/source_status` 引用实际本轮授权及材料范围，说明允许读取和写入的具体路径、产物及结束条件；已有具体任务指令可直接记录。`organize` 由资料 agent 执行，仅整理既有内容；`read_only_review` 由独立评审 agent 执行，原稿只读，输出具体阅读问题与证据。独立模式的额外调研等任务须直接依赖已验收的 `scope`。`materials` 可将既有正文／大纲只读保存为来源，整理结果只写资料目录，不向草稿区、大纲或顶层正式正文登记输出；`review_only` 只产出审稿与接续记录，不修改活动故事资料。独立模式不能添加构思、正文、试写、修订、专项创作或采用任务；发现未定创作矛盾只报告，新的创作任务另获授权后进入相应工作流。
+
+新建项目或迁入缺失账本时，分别用 `novelctl init --workflow materials|review_only` 或 `taskctl init --workflow materials|review_only` 选择初始流程；默认仍为 `planning`。当前唯一 `S01` 还只是完全未开工的规划骨架时，可用 `plan` 提交 `{"id":"S01","workflow":"materials","reason":"真实本轮仅整理要求","verification":{"agent_id":"实际主agent","source":"真实作者指令出处"}}` 显式改派。原阶段完整保存在 `workflow_history`；已有任务输入、产物、检查、执行历史或已规划后续时拒绝改派，不能借此抹去未完任务。已开工阶段内的临时独立请求可增加有限额外任务并交付，原阶段保留真实未完项，不宣称已结项。授权仅到本次整理或审稿时，验收 `next_plan` 的真实 `end_reason` 后即可正常关闭独立阶段，之后可按新授权建立下一阶段。
 
 ### v2：在原任务中验收具体编辑责任
 
@@ -33,21 +41,86 @@
 
 | 任务 | 必需 `checks` 键 | 验收内容 |
 | --- | --- | --- |
+| `scope` | `authorization`, `source_status` | 本轮真实授权、允许输入／输出路径、原文版本、缺口与终点；不补创作方向问卷 |
+| `organize` | `source_status`, `handoff` | 实际整理范围、原文支持、未定矛盾及接续；无新增创作选择时仍说明 `creative_decisions.none_reason` |
+| `read_only_review` | `reader_experience`, `editorial_findings` | 实际阅读版本、范围、独立性限制与有原文证据的审稿意见 |
 | `direction` | `author_preferences`, `startup_mode`, `authorization` | 阅读目标、偏好来源与范围；资料方式的实际选择或有效免问记录；合作方式与本轮授权 |
 | `concept` | `story_engine` | 持续选择、主故事承诺及长篇支撑风险 |
-| `prepare` | `author_preferences`, `chapter_design`, `global_direction`, `source_status`, `prose_policy` | 本章约定；人物诉求、变化和详略；总编意见；关键设定支持范围；从约定提取的执行规则 JSON |
-| `voice_trial` | `style_scope` | 实际对照、采用依据及仅本章／视角／全书的生效范围 |
+| `prepare` | `author_preferences`, `chapter_design`, `global_direction`, `source_status`, `prose_policy` | 本章约定；人物诉求、变化和详略；三项专项方案及曲线主导安排、总编意见；关键设定支持范围；从约定提取的执行规则 JSON |
+| `voice_trial` | `style_scope` | 两份候选的实际差异、作者已选比较范围、共同约束、待选择状态及后续阅读／选声路径，不预先确定采用声音 |
 | `first_read` | `reader_experience` | 封存的自由阅读体验、阅读范围及隔离限制 |
-| `review` | `editorial_findings`, `global_direction` | 连贯性与阅读问题的证据；跨章推进、重复、承诺与成长节点 |
+| `review` | `editorial_findings`, `global_direction` | 分角色代入报告及全稿编辑核查、连贯性与阅读问题证据；跨章推进、重复、承诺与成长节点 |
 | `revise` | `issue_disposition` | 重要意见如何修改、拒绝或按授权保留，以及代价 |
-| `recheck` | `current_version`, `issue_disposition` | 当前稿的独立全文／增量复核与问题处理结论 |
-| `sync` | `source_status`, `handoff` | 正文事实、推测与过期指令处理；当前进度、限制和待办 |
+| `recheck` | `current_version`, `issue_disposition` | 当前稿的独立全文／增量复核与问题处理结论；受影响角色的代入复核 |
+| `sync` | `source_status`, `handoff` | 三项专项正式更新及不可变依据；正文事实、推测与过期指令处理；当前进度、限制和待办 |
 | `next_plan` | `global_direction`, `handoff` | 后续推进和连读安排；接续入口或授权终点 |
 | `whole_read` | `reader_experience`, `global_direction` | 完整范围的实际阅读、结构及承诺兑现 |
 | `structural_revision` | `issue_disposition` | 整体问题的实际处理或有依据的保留 |
 | `whole_recheck` | `current_version`, `issue_disposition` | 当前完整范围的复核与重大问题处理 |
 
 `draft`、`adopt`、`finalize` 沿用原有产物与机械门槛，不另堆检查键。`submitted` 和 `done` 都要有相应证据；脚本只核验结构、引用和版本，主 agent 仍须核对内容及真实派工。填写“总编已读”或 `summary` 不能证明实际阅读和问题已解决。
+
+### 对照试写的阅读与选声
+
+`trial` 保留原核心顺序和字段，`voice_trial` 只负责交付同场景两份候选、版本与已选比较范围；尚未匿名阅读及获得选择时，验收不能写成“已采用声音”。资料子 agent 在同一账本的 `voice_trial` 与 `draft` 之间插入下列完整的额外任务对象，再 `render`；不得把核心 `first_read` 提前或重复创建。
+
+| 非核心 kind 与示例任务 ID | 必需前置 | 产物与验收 |
+| --- | --- | --- |
+| `voice_first_read`，如 `S02.V01.read` | `S02.voice_trial` | 未参与候选写作的真实评审对两份候选匿名阅读；`inputs` 绑定候选及必要中性前文哈希，`outputs/checks.reader_experience` 保存封存反馈、实际阅读范围和隔离限制。反馈封存后才提供推荐理由或作者意图。 |
+| `voice_selection`，如 `S02.V01.select` | `S02.V01.read` | 由资料子 agent 记录真实作者选择或有效免问依据；`inputs` 绑定候选、已验收反馈及作者决定，`outputs/checks.style_scope` 记录选中版本、代表片段、适用范围、理由和待验证项，`checks.creative_decisions` 按作者决定门槛填写并在开工前核验。 |
+
+`draft` 保留原有 `S02.voice_trial` 前置，并追加实际选择任务 ID `S02.V01.select`；因此依赖关系为 `voice_trial → voice_first_read → voice_selection → draft → first_read`。两类新增任务一经安排都须走 `doing → submitted → 主 agent 核验 → done`，不能用 `not_applicable` 跳过。即使比较范围已获授权，也不能据此提前选择结果；作者尚未选择且无覆盖选声的有效免问依据时，选择节点保持待办／受阻，不能先出采用章稿再补决定。
+
+候选阅读采用首读的中性输入与元数据检查；执行者的 `gate --neutral`／`--book-ref` 绑定实际 `voice_first_read` 任务，不指向等待章稿的核心 `first_read`。选择后最终章稿仍由满足隔离条件的上下文完成核心 `first_read`，旧 A/B 反馈只作比较证据。候选、比较范围或选择依据变化时重新打开受影响节点和下游，保留旧报告及决定历史。只比较到本场景，不自动推广全书；实际身份、匿名程度与作者原话仍由主 agent 对照宿主记录核验，技术测试不证明文学效果。
+
+### 角色评审任务与返工轮次
+
+角色视角评审归入现有章节及定稿闭环，不新增阶段、`checks` 键或评审 schema。资料子 agent 在唯一 JSON 数据区按范围增加下列固定非核心 kind，再 `render`；三者必须有真实报告并验收为 `done`，脚本禁止 `not_applicable`。材料缺失或信息不足要如实报告；报告职责验收为 `done` 不表示人物行为已被认定合理，编辑须区分材料缺项与正文缺乏支持，必要时重开材料及受影响角色节点补做。确无适用关键角色时，由独立编辑在核心报告写明所查行为、范围及不适用理由，不先建角色任务再跳过。脚本不会自动判断角色覆盖，主 agent 仍须核对完整稿和实际派工。
+
+| kind | 实际职责 |
+| --- | --- |
+| `role_materials` | 按角色和行为时点筛选材料，保存中性版本及由编辑持有的原件映射；不能让角色执行者先读秘密再自行忽略。 |
+| `role_perspective` | 每个隔离上下文代入一个角色，提交行为、口吻、知情和可选行动依据，标明不足和不确定性。 |
+| `role_editorial` | 在没有章节核心 `review` 的定稿阶段，独立编辑综合角色报告、完整正文及过滤映射，核查材料完整性和正文支持；不能由当前稿写作者代评。 |
+
+宜在阶段细化时安排；执行中新补任务保留原状态和历史，`current_task` 同步为真实首个未验收项。每个新增节点用唯一 ID，不能复制核心 kind，也不因 kind 重复而省略定位。章节初评的材料任务依赖已验收的 `first_read`，各角色任务依赖材料，核心 `review` 保留原前置并追加角色任务依赖；各报告逐份走 `doing → submitted → 主 agent 核验 → done`。默认顺序派工；并行阅读仍串行落盘和立即提交，不能等整章完成后补账。`review.inputs` 引用已验收角色证据，`review.outputs/checks.editorial_findings` 保存编辑综合判断及实际版本。
+
+**新增复核节点与重开既有节点分开处理。** 第一轮初评可用 `S02.R01.materials/A/B`，修订后新增 `S02.R02.materials/A/B`，后者依赖已验收的 `revise`，`recheck` 保留 `revise` 并追加 R02 角色依赖；不把 R01 材料节点改成依赖 `revise`，否则 `review → revise → R01 → review` 会成环。不同故事时点的材料也分别绑定，不能用新时点认知回头重评旧行为。
+
+`recheck` 又要求改稿时，先冻结本次复核意见，重开稳定的 `revise` 及受影响下游；旧复核意见作为不可变文件输入交修订者，不能给 `revise` 反向追加 `recheck` 依赖。已经存在的后置 R02 节点可保留稳定账本 ID 重开执行，保留旧完成历史；新轮次必须换实际宿主任务／隔离上下文及不可变报告文件（如 `R03-A.md`），不覆盖旧报告、不只换哈希。新角色或新职责才另建新 ID，不能机械叠加一套相同职责并让已过期旧任务继续充当前置。初评及复核角色材料／稿件变化时同样重开受影响节点；保留依赖方向，按实际新输入、报告及独立编辑结论重新验收。
+
+定稿的 `whole_read` 先完成完整独立阅读并封存。随后材料任务依赖 `whole_read`，分角色任务依赖对应材料，`role_editorial` 依赖全部本轮角色报告；`structural_revision` 保留 `whole_read` 并追加编辑综合任务依赖，其 `issue_disposition` 逐项承接角色发现。受影响角色的定稿复核任务依赖已验收的 `structural_revision`，独立编辑综合后作为 `whole_recheck` 追加前置，证据归入现有 `current_version/issue_disposition`。角色局部报告不代替完整全稿阅读。需要改正式正文时走下文 `defer` 及逐章采用同步，返回后重新整体阅读和角色核查，旧报告只作历史依据；无需改动也要有当前依据。
+
+执行者只收到中性输入、版本 ID 与哈希；真实书根、内部稿件路径、含秘密的阶段／任务 ID 可放进书外临时 `--book-ref` 引用，由 `gate --book-ref 中性引用路径 --neutral` 在内部核验，执行者不得打开引用或完整账本。材料副本也必须筛查标题、各级路径、对象 ID、链接及注释等元数据，原件映射仅交独立编辑。具体协议及派工模板见[协作流程](orchestration.md)“派工元数据也须隔离”。门槛目标必须是本角色实际任务，不能指向正在等待本报告的核心 `review/recheck`。报告内容、角色覆盖、信息隔离和行为判断仍由主 agent 核验，脚本不认证语义。
+
+### 专项任务与主文件版本
+
+三项专项职责使用固定的非核心 kind：`storyline_management`（故事线管理）、`hook_management`（钩子管理）、`curve_direction`（起伏曲线主导）。它们一旦列入本轮必需依赖，就必须以真实产物验收为 `done`，不得用 `not_applicable` 跳过；脚本对这三种 kind 禁止该状态。三类规划也纳入已有作者决定预检查：`checks.creative_decisions` 引用真实已选依据，无新增决定时明确 `none_reason`；不借专项任务名绕过决定性选择。模板不会自动生成这些专项任务或派工；主 agent 须让资料 agent 按下表插入任务及依赖。脚本不验证文学判断或真实身份，主 agent 须核对实际三位执行者及内容。
+
+沿同阶段额外任务的现有方式安排唯一 ID、负责人、依赖和验收条件，不复制核心 kind，不增加第二本账本。各轮新增的专项调整任务用新 ID，旧产物与旧稿版本保留；新增任务后游标仍指向真实首个未验收项。相同 kind 在同阶段有写前、采用后等多项，gate/update/submit 必须按唯一任务 ID（如 `S02.curve_pre`、`S02.curve_post`）定位，不能用 kind 猜测目标。主 agent 与执行者各自运行目标任务的 gate，再登记执行、提交和验收；专项 owner 可以读其允许的规划资料，不能接管隔离首读或角色任务。
+
+| 工作位置 | 专项任务及核心步骤的衔接 |
+| --- | --- |
+| 新书规划 | `concept` 形成并验收已选构思后，故事线、钩子、曲线分别建立初始记录；曲线方案依赖前两份已验收依据，`next_plan` 保留原前置并追加三项依赖。未选新走向只作提案，不登记为有效设定。授权 `init` 只建待规划骨架，不算专项规划完成。 |
+| 章节／试写准备 | 在 `prepare` 前安排三项本轮方案；故事线和钩子方案先完成，曲线方案综合二者后完成。`prepare` 追加专项依赖、引用三份不可变方案，再交写作者执行；旧书缺主文件时先在这些任务内核对并建立，沿用已登记同义主路径。 |
+| 成稿评审与返工 | `review/recheck` 的独立编辑对照三项已验收方案、首读与当前稿评定实际效果；专项 owner 不能用自评代替它。仅有受影响项时新增对应调整任务：写前调整依赖已验收的 `review`，绑定已选调整并作为本轮 `revise` 的追加前置；修改成稿后的补充核对依赖 `revise`，绑定实际新稿并作为 `recheck` 的追加前置；每轮另取 ID，不能把旧写前任务追加下游依赖造成循环。 |
+| 采用后同步 | 三项正式更新任务都依赖已验收的 `adopt`，各 owner 更新其主文件并提交不可变依据；`sync` 保留 `adopt` 并追加这三项依赖。一般资料 agent 汇总索引、摘要、变化记录及交接，运行 `finish` 后才验收 `sync`。专项任务不提前把候选稿当正式实际，不在 pending 期间开下一轮写前任务。 |
+| 后续计划 | `next_plan` 引用采用后专项依据，列出到期钩子、各线下一推进、曲线 owner 的下一轮方向／待选项；详细下一轮方案仍待下一阶段合法开工。 |
+| 全书定稿 | `whole_read` 完整阅读验收后，三位 owner 据全稿与独立反馈做总核查，`structural_revision` 保留 `whole_read` 并追加三项依赖。有结构修订时受影响 owner 新建更新任务、依赖 `structural_revision`，`whole_recheck` 保留其原前置并追加这些依赖；无改动也保留判断依据。需要修改正式正文时先用下文 `defer` 暂挂定稿，逐章完成采用与同步后返回重新全稿阅读及专项核查；不能用专项更新替代正文采用。 |
+
+三份主文件持续维护，历史任务不得将它们的活动路径及当前哈希直接作为长期 `inputs/outputs/checks`。每位 owner 在任务内保存本轮不可变依据副本（如 `历史版本/专项管理/S02-写前-钩子.md`），记录主文件路径、所据正文／方案、实际任务与 agent、当时计划／实际内容及版本；提交和后续任务读取、引用这些副本的真实哈希。三份主文件是当前内容入口，副本只作历史依据，不能再变成另一套有效计划。未验收本轮采用前持续保持旧正式实际，候选结论另列。
+
+采用后本轮更新要记录正式章核对版本、三项实际结果或未分析／无变化理由、偏差及复查点，因此变化记录的 `clues/storylines/curve` 类别分别关联钩子、故事线、曲线 owner 的更新文件；内容无新增不等于未检查。资料 agent 刷新索引后再计算 `finish` 所需活动文件哈希；长期任务证据仍引用已固定的专项副本。主文件正常续写不使历史快照过期，正文或依据真正变化时重新打开受影响任务、保留旧证据并复核，不能只换哈希。
+
+### 关键结果与实际操作绑定
+
+新建 v2 阶段带 `result_gate_version: 1`，不能关闭或降级；旧无标记阶段保留历史契约，不补造操作。`submitted/done/check/close` 都复查关键结果，不能仅提交普通报告就宣称采用、同步或定稿：
+
+- `adopt.operation_id` 对应本阶段、本章的真实采用档案，`outputs` 覆盖实际安装的正式章及其哈希，作品状态的采用操作编号也一致。
+- `sync` 对应该操作的固定 `completion.json`，必须已真正完成 `finish` 且无 pending；`outputs` 引用本次变化记录或其固定 `synchronization.json` 副本。后续资料正常变化不改写这份完成凭据。
+- `finalize.outputs` 绑定有效的全书定稿 JSON，记录的 `task_stage` 为本阶段，并通过当前完整章节清单、报告、章节检查与全稿复核覆盖检查。
+
+当前阶段仍核对实际正式版本；已关闭阶段的操作档案保留为当时完成的历史依据，不强求当前改章后仍沿用旧采用操作。
 
 ### 开书停点：先收到答复，再开始实质工作
 
@@ -71,7 +144,7 @@
 }
 ```
 
-`resolution` 为 `provided`（作者已主动给出具体决定）、`selected`（回答了实际选项）、`delegated`（问过后明确选择全部按推荐且不用询问）或 `unresolved`。前三者必须有非空 `value`、`source_quote` 和 `scope`；新决策门槛对 `selected/delegated` 还检查下节问答依据。任何必需项仍为 `unresolved`、缺字段或仅有 `summary`，都不能提交／验收 `direction` 或进入依赖它的构思任务。待答期间保持待执行或 `blocked`，不先完成大纲再补账。
+`resolution` 为 `provided`（作者已主动给出具体决定）、`selected`（回答了实际选项）、`delegated`（问过后明确选择全部按推荐且不用询问）或 `unresolved`。前三者必须有非空 `value`、`source_quote` 和 `scope`；新决策门槛对 `selected/delegated` 还检查下节问答依据。仅书名另可用 `deferred` 表示作者明确暂缓定名，须有与未定项目匹配的 `work_id`、真实 `source_quote` 和 `scope`，不能带已选书名 `value` 或弃用名状态，初始化入口见[文件协议](file-protocol.md)。其他必需项仍为 `unresolved`、缺字段或仅有 `summary`，都不能提交／验收 `direction` 或进入依赖它的构思任务。待答期间保持待执行或 `blocked`，不先完成大纲再补账。
 
 这些位置用于核对关键决定，不要求逐字段分开询问。已有具体答案直接引用；只有真实提问后，作者明确选择“全部按推荐且不用询问”，才可在该范围按推荐决定。泛泛“你定”“帮我写”“AI 主导”、只回答语言密度或本批全选 A，不能自动覆盖其他项目或未来选择。有限试写本身也不授权 agent 选择人物命运、冲突结局等决定性内容；先让作者选择，或取得上述唯一免问授权。单纯资料整理和不改变已选内容的机械维护无需全套开书问卷，但整理中发现的创作矛盾不能擅自定案。
 
@@ -107,9 +180,9 @@
 
 这些任务在写前运行 `gate` 时即检查本任务的 `creative_decisions` 和所引文件的当前哈希，而非等写完提交才查。资料子 agent 可先用 `update` 在尚未验收的任务登记真实作者输入及此检查；这只登记已有选择，不生成故事方案。完整输出和其他编辑检查仍按正常提交／验收阶段提供。门槛未过时，停止依赖该决定的工作并回到对话给作者选项；不能改为另一任务名先写出来。脚本无法识别是否漏列决定，执行者与主 agent 都须对照实际内容核验。
 
-书名决定还需 `prior_status: proposed|active|retired|rejected|unknown`，并与作品状态中的当前书名完全一致。目录名、素材标题或历史候选均不是作者选名证据；`retired/rejected` 另需非空 `history_source` 和 `reuse_confirmation`，其中 `acknowledges_retired: true`、`answer_quote` 必填。作者主动明确恢复（`provided`）时，`source_quote` 与 `answer_quote` 保留具名恢复原话，不要求捏造提问或再次询问。`selected/delegated` 则须实际 `question_quote` 点明具体旧名及曾弃用事实；单项答复明确该名，或通过 `selected_title` 与真实问题的选项映射指向它（如作者只回 A，`source_quote` 与 `answer_quote` 均保留 A，不能改写成具名原话）。若对这批明确展示的推荐选“全部按推荐且不用询问”，`opt_out.question_quote` 也须点名该旧名，复用确认的答复须与 `opt_out.answer_quote` 一致，不能用未提旧名的泛许可复活它。
+书名已选决定还需 `prior_status: proposed|active|retired|rejected|unknown`，并与作品状态中的当前书名完全一致。目录名、素材标题或历史候选均不是作者选名证据；`retired/rejected` 另需非空 `history_source` 和 `reuse_confirmation`，其中 `acknowledges_retired: true`、`answer_quote` 必填。作者主动明确恢复（`provided`）时，`source_quote` 与 `answer_quote` 保留具名恢复原话，不要求捏造提问或再次询问。`selected/delegated` 则须实际 `question_quote` 点明具体旧名及曾弃用事实；单项答复明确该名，或通过 `selected_title` 与真实问题的选项映射指向它（如作者只回 A，`source_quote` 与 `answer_quote` 均保留 A，不能改写成具名原话）。若对这批明确展示的推荐选“全部按推荐且不用询问”，`opt_out.question_quote` 也须点名该旧名，复用确认的答复须与 `opt_out.answer_quote` 一致，不能用未提旧名的泛许可复活它。
 
-新建作品在创建目录前就要核对书名决定；CLI 及保存入口见[文件协议](file-protocol.md)。连续采用 `continuous` 只涉及何时采用稿件，不赋予决定人物走向或冲突解法的权限；稿件采用授权与创作选择须分别满足。
+新建作品在创建目录前核对已选书名决定或作者明确暂缓定名记录；中性工作标识不冒充书名、不放宽弃用名复用规则。CLI 及保存入口见[文件协议](file-protocol.md)。连续采用 `continuous` 只涉及何时采用稿件，不赋予决定人物走向或冲突解法的权限；稿件采用授权与创作选择须分别满足。
 
 总编的章前判断、写后判断和阶段连读由 `prepare/review/next_plan` 承接。已触发而未完成的必要连读须登记并处理，再继续依赖它的章节；不能只把总编写在角色名单里。触发与角色独立性见[协作流程](orchestration.md)。
 
@@ -121,21 +194,23 @@
 
 ## 输入、证据与返工
 
-输入与产物使用作品内规范相对路径及实际 SHA-256。完成任务必须有当前有效的产物证据；`next_plan` 检查账本内的下一阶段或结束理由，不要求创建重复计划文件。不要把账本自身或不断变化的 `创作约定/作品状态.json` 作为任务哈希输入，否则更新记录本身就会令任务失效。历史稿、首读原件和采用前快照按现有版本规则保留。
+输入与产物使用作品内规范相对路径及实际 SHA-256。未登记／越序检测覆盖所有作品资料目录，包括人物、世界、连贯性、摘要、关系、资源及自定义目录；索引、技术管理文件、历史档案和内容未改的初始化空骨架按各自规则处理。作者原有材料通过真实 `recover author_input` 登记，不凭目录名免检。完成任务必须有当前有效的产物证据；`next_plan` 检查账本内的下一阶段或结束理由，不要求创建重复计划文件。不要把账本自身或不断变化的 `创作约定/作品状态.json` 作为任务哈希输入，否则更新记录本身就会令任务失效。历史稿、首读原件和采用前快照按现有版本规则保留。
+
+持续更新的资料主文件不直接成为历史任务长期哈希证据：先保存当轮不可变内容副本，将该副本列入 `outputs`，可附 `material_files: [{"path":"人物/当前人物.md","sha256":"本轮当前副本哈希"}]` 关联本次维护的活动文件。提交或改变声明时核对活动文件真实哈希；历史任务继续绑定不可变副本，后续合法维护另交新副本和新声明。不能通过该字段预注册未来产物，也不能借它声明正文、草稿、大纲或审稿报告，这些仍须按实际任务独立登记。索引和状态更新不作为故事产物。采用后 `sync doing` 期间，采用请求中的变化记录及其 `updated_files` 可暂时关联本轮资料，`finish` 校验并封存后由固定完成凭据承接；已验收同步后来重开时，凭据所证明的旧资料版本仍保留历史来源资格，但不恢复任务完成状态，新改资料仍须重新登记。不因此允许新创作。
 
 所有来源只限当前作者指定书根；不能把其他由本 Skill 创作的书登记成输入、候选、历史证据或恢复来源，复制到本书也不改变来源。恢复核对文件沿用本书作者约定、既有接续或实际异常说明，不新建另一套任务账本。任务证据可验证路径及版本，是否跨书须对照真实来源核验；单书边界见[文件协议](file-protocol.md)。
 
-`check` 检查当前阶段的固定步骤、依赖、已验收证据和显示一致性，正常的未开始任务不等于检查失败。`gate` 检查目标步骤的前置依赖闭包，未验收、证据缺失或哈希过期时不能继续；执行门槛还检查实质产物是否与任务对应。主 agent 派工前运行，执行子 agent 在写入实质产物前也自行运行同一门槛；失败只返回缺项与原状态，不能先写后补。首读者只运行中性阶段／任务标识对应的 `gate --neutral`，不读取账本内的创作信息；该模式不回显原始异常或内部证据路径，主 agent 用普通 gate 或 check 查看详细诊断。当前阶段未关闭，不得跳到已规划的未来阶段执行。
+`check` 检查当前阶段的固定步骤、依赖、已验收证据和显示一致性，正常的未开始任务不等于检查失败。`gate` 检查目标步骤的前置依赖闭包及目标任务自身已登记输入的当前哈希，未验收、证据缺失或哈希过期时不能继续；执行门槛还检查实质产物是否与任务对应。存在未完成采用操作时，先完成当前采用的行政登记、采用后专项更新与同步，或恢复现场，不重开起草、试写、修订等新创作。启用执行门禁的采用和同步任务须先登记 `doing`，写命令不能代替开工登记；关闭阶段前也须处理未登记或越序产物。唯一行政接续例外是来源、原话与版本仍有效且明确归属 `next_stage` 的 `held_output`：可以关闭当前已验收阶段以移动恢复游标，但下一阶段的普通 gate 仍阻断创作，须继续按 `recovery_only` 顺序补齐真实缺项；未知产物、来源失效或归属不符不适用。主 agent 派工前运行，执行子 agent 在写入实质产物前也自行运行同一门槛；失败只返回缺项与原状态，不能先写后补。首读者和角色视角评审者只运行绑定各自实际任务的中性 gate，元数据越界时通过 `--book-ref` 隐藏真实书根及账本 ID，不读取引用文件或账本内的创作信息；该模式不回显原始异常或内部证据路径，主 agent 用普通 gate 或 check 查看详细诊断。当前阶段未关闭，不得跳到已规划的未来阶段执行。
 
 输入或产物变化时，检查报告失效任务及受影响的下游任务；资料子 agent 将对应任务重新打开，保留旧状态、旧证据和失效原因，再更新实际新输入、修订及复核证据。重新打开已完成任务会连带重新打开其下游完成项。只复核影响范围；原首读保留为旧稿阅读证据，不伪称读过意图的评审者又完成了盲读。
 
 直接更新已验收任务的证据、操作号或处理理由也必须提供新的主 agent 验收依据，并会重新打开下游完成项；不能用旧验收或只替换哈希保留后续勾选。
 
-首读评审只能收到中性任务标识、必要正文与前文、哈希、读取规则和已经核验的依赖结论，不能收到整个任务账本或包含未来秘密的阶段计划。资料核查阶段才能提供相关计划与意图。
+首读评审只能收到中性任务标识、必要正文与前文、哈希、读取规则和已经核验的依赖结论，不能收到整个任务账本或包含未来秘密的阶段计划。相关计划与意图只交资料核查/全稿编辑，不交角色视角评审者；后者即使位于 `review/recheck` 阶段，也只接收对应故事时点的角色材料和中性门槛，不打开完整账本或普通诊断。
 
 ## 命令与执行顺序
 
-命令中的 `SKILL`、`BOOK` 使用真实绝对路径，请求文件使用实际路径。主 agent 可运行 `check`、`gate` 等只读命令；`init`、`plan`、`update`、`submit`、`recover`、`render`、`close` 由资料子 agent 执行。请求 JSON 优先保存为临时文件，避免 shell 转义；这些请求不构成第二份任务账本。下列是 Bash 变量示例；Windows PowerShell 请用带引号的实际路径。`python` 须为 Python 3.9+，Linux/macOS 可替换为 `python3`，Windows 可替换为 `py -3`。
+命令中的 `SKILL`、`BOOK` 使用真实绝对路径，请求文件使用实际路径。主 agent 可运行 `check`、`gate` 等只读命令；`init`、`plan`、`update`、`submit`、`recover`、`defer`、`render`、`close` 由资料子 agent 执行。请求 JSON 优先保存为临时文件，避免 shell 转义；这些请求不构成第二份任务账本。下列是 Bash 变量示例；Windows PowerShell 请用带引号的实际路径。`python` 须为 Python 3.9+，Linux/macOS 可替换为 `python3`，Windows 可替换为 `py -3`。
 
 ```bash
 python "$SKILL/scripts/taskctl.py" init --book "$BOOK"
@@ -143,6 +218,7 @@ python "$SKILL/scripts/taskctl.py" plan --book "$BOOK" --request /绝对路径/�
 python "$SKILL/scripts/taskctl.py" update --book "$BOOK" --request /绝对路径/任务请求.json
 python "$SKILL/scripts/taskctl.py" submit --book "$BOOK" --request /绝对路径/提交请求.json
 python "$SKILL/scripts/taskctl.py" recover --book "$BOOK" --request /绝对路径/恢复来源请求.json
+python "$SKILL/scripts/taskctl.py" defer --book "$BOOK" --request /绝对路径/定稿改章请求.json
 python "$SKILL/scripts/taskctl.py" check --book "$BOOK"
 python "$SKILL/scripts/taskctl.py" gate --book "$BOOK" --stage S02 --before review
 python "$SKILL/scripts/taskctl.py" close --book "$BOOK" --stage S02
@@ -180,6 +256,23 @@ python "$SKILL/scripts/taskctl.py" render --book "$BOOK"
 3. **全书定稿**：`bookctl check` 检查 `finalize` 前置任务及当前完整正式正文的版本覆盖；通过并核验语义及授权后，才验收 `finalize`。`bookctl manifest` 获取清单时无需先完成定稿任务。
 
 `close` 要求阶段必做项全部验收、条件项正确处理、下一阶段计划或本轮终点有依据，且没有未完成的机械操作。任务文件更新后按文件协议刷新索引；它不替代 `chapterctl finish`、`bookctl check` 或作者决定。
+
+### 定稿期间需要逐章修订
+
+`finalization` 的全稿阅读或专项总核查若发现必须修改正式正文，不把未完成定稿勾完，也不直接开未来章。资料 agent 用 `defer` 暂挂当前定稿并转入一个正常的 `chapter` 修订阶段：
+
+```json
+{
+  "stage": "S10",
+  "revision": {"id": "S11", "title": "处理全稿核查指出的章节问题", "chapter": 3},
+  "reason": "实际全稿核查指出的改章范围与依据",
+  "verification": {"agent_id": "实际主agent标识", "source": "真实核验及调度记录"}
+}
+```
+
+只允许当前未关闭定稿阶段：`whole_read` 及已有完成项必须仍有效，`finalize` 尚未验收，无 pending 或进行中／待验收任务，所有既有产物已合法登记。仅有定稿阶段未关闭时创建默认 v2 修订章；若已有唯一下一阶段，只能复用请求指定、章号相同且从未执行的 v2 `chapter` 阶段，其作者决定和执行门槛均须启用。其他未来计划不会被静默删除或越过。
+
+命令保留定稿各任务的原状态、证据及暂挂理由于历史，清空其当前证据并全部重开为待执行，将修订章排到定稿之前；修订章关闭后返回定稿。修订章仍须三项写前方案、独立评审、作者决定、正式采用及专项同步，`next_plan` 指回已暂挂的定稿阶段。返回后重新完整阅读、专项核查与复核，旧结论只作历史依据，不能继续支持新稿定稿；需再改另一章时重复此路径。若存在未验收产物或同步中断，先按原流程处理真实状态，不用 `defer` 洗成历史完成。
 
 ## 新书、旧书与交接
 

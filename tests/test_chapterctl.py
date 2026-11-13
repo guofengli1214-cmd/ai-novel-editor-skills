@@ -63,6 +63,48 @@ class ChapterTests(unittest.TestCase):
         self.assertTrue(cc.check(self.root)['ok'])
         self.assertEqual(before, nc.inventory(self.root))
 
+    def test_adoption_rejects_skipped_numbers_before_writing(self):
+        self.req.update(number=2, target='第2章.md')
+        before = nc.inventory(self.root)
+        with self.assertRaisesRegex(ValueError, 'continuous from 1'):
+            self.adopt()
+        self.assertEqual(nc.inventory(self.root), before)
+        self.assertFalse((self.root / '第2章.md').exists())
+        self.assertEqual(nc.load_state(self.root)['pending_operations'], [])
+        self.req.update(number=1, target='第1章.md')
+        first = self.adopt()
+        self.record()
+        cc.finish(self.root, first)
+        self.req.update(number=3, target='第3章.md')
+        before = nc.inventory(self.root)
+        with self.assertRaisesRegex(ValueError, 'continuous from 1'):
+            self.adopt()
+        self.assertEqual(nc.inventory(self.root), before)
+        self.assertEqual(nc.load_state(self.root)['pending_operations'], [])
+
+    def test_continuous_append_preserves_existing_chapter(self):
+        first = self.adopt()
+        self.record()
+        cc.finish(self.root, first)
+        original = (self.root / '第1章.md').read_bytes()
+        self.req.update(number=2, target='第2章.md', expected_sha256=None)
+        self.assertTrue(self.adopt()['ok'])
+        self.assertEqual((self.root / '第1章.md').read_bytes(), original)
+        self.assertEqual([ch['number'] for ch in nc.load_state(self.root)['chapters']], [1, 2])
+
+    def test_chapter_check_rejects_existing_number_gaps(self):
+        operation = self.adopt()
+        self.record()
+        cc.finish(self.root, operation)
+        state = nc.load_state(self.root)
+        state['chapters'][0]['number'] = 2
+        self.json(nc.STATE, state)
+        before = nc.inventory(self.root)
+        result = cc.check(self.root)
+        self.assertFalse(result['ok'])
+        self.assertIn('chapter numbers must be continuous from 1', '\n'.join(result['issues']))
+        self.assertEqual(nc.inventory(self.root), before)
+
     def test_review_failures(self):
         cases = [dict(reviewer=dict(task_id='other', agent_id='writer')), dict(draft_sha256='0'*64), dict(coverage=['literary']), dict(verdict='revise'), dict(issues=[dict(id='x', severity='hard', description='x', evidence='x', status='open')]), dict(issues=[dict(id='x', severity='must_fix', description='x', evidence='x', status='open')])]
         for changes in cases:

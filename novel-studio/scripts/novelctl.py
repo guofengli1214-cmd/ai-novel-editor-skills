@@ -10,7 +10,10 @@ operations block export. check flags unregistered top-level Markdown files.
 New books enable task_management and initialize the single task ledger.
 init_book(..., task_management=False) retains legacy fixtures without a ledger;
 the init CLI always enables task management and requires --title-decision JSON
-with the author's actual title choice. A supplied API title_decision is checked
+with the author's actual title choice or explicit deferral. --work-id separates
+the portable directory identifier from a selected title; an unnamed project
+requires a matching deferred record and preserves title:""/title_status:"unresolved".
+A supplied API title_decision is checked
 before creating directories and preserved in the author's agreement record.
 Omitting it from the low-level API retains legacy fixture compatibility.
 Export does not require finalization.
@@ -18,9 +21,11 @@ Public API: load_state(book), check_book(book), index_book(book),
 snapshot_book(book, label), restore_book(book, snapshot), export_book(book, output).
 All writing commands are for the materials subagent; the main agent uses check.
 Snapshots live in 历史版本/<id>/ with manifest.json and payload/; history
-is excluded. Restore validates first, stages a complete replacement, preserves
-history and creates a verified pre-restore snapshot. A sibling recovery copy
-is retained if committing fails. Concurrent writers must be stopped for restore. check validates inline and
+is excluded. Restore validates first, stages a complete replacement and preserves
+history. It creates a verified pre-restore snapshot when current state is readable;
+otherwise its pre-restore backup is the unchanged sibling recovery directory,
+not a snapshot. The original directory is retained on successful restore and
+reinstated if committing fails. Concurrent writers must be stopped for restore. check validates inline and
 reference Markdown local file links (including JSON); heading anchors and
 complex Markdown syntax are not validated. TXT preserves Markdown text verbatim.
 """
@@ -42,6 +47,34 @@ BEGIN = '<!-- novelctl:auto:start -->'
 END = '<!-- novelctl:auto:end -->'
 DIRECTORIES = ('创作约定', '大纲', '人物', '世界与地点', '连贯性记录', '摘要',
                '审稿与修订', '草稿与备选', HISTORY)
+
+# These empty management records are created only by init, never by read/check.
+MANAGEMENT_FILES = {
+    '线索与悬念/钩子管理.md': (
+        '# 钩子管理\n\n## 用途与职责\n\n'
+        '用途：分别管理读者期待与钩子的设置、承接、兑现及有意留白。\n'
+        '专职角色：钩子管理子 agent；本次仅建立空入口，尚未派工分析。\n\n'
+        '## 计划\n\n待建立。尚无已定钩子或兑现安排。\n\n'
+        '## 实际\n\n未分析。尚无正式正文，不登记已设置或已兑现的钩子。\n\n'
+        '## 来源与版本\n\n待登记。后续条目须引用作者约定、计划或正文及其文件版本；'
+        '计划与正文实际分别记录，不把提案当作已发生事实。\n'),
+    '故事线/故事线管理.md': (
+        '# 故事线管理\n\n## 用途与职责\n\n'
+        '用途：分别管理主支线及其关联、推进、交汇与收束。\n'
+        '专职角色：故事线管理子 agent；本次仅建立空入口，尚未派工分析。\n\n'
+        '## 计划\n\n待建立。尚无已定主支线或故事走向。\n\n'
+        '## 实际\n\n未分析。尚无正式正文，不登记已推进或已收束的故事线。\n\n'
+        '## 来源与版本\n\n待登记。后续条目须引用作者约定、计划或正文及其文件版本；'
+        '计划与正文实际分别记录，不把提案当作已发生事实。\n'),
+    '曲线与节奏/故事起伏曲线.md': (
+        '# 故事起伏曲线\n\n## 用途与职责\n\n'
+        '用途：主动主导场景、章节、阶段与全书的起伏规划，管理张弛、压力、情绪及希望与挫败变化。\n'
+        '专职角色：起伏曲线管理子 agent；本次仅建立空入口，尚未派工分析。\n\n'
+        '## 计划\n\n待建立。尚无已定起伏安排或曲线取值。\n\n'
+        '## 实际\n\n未分析。尚无正式正文，不登记实际起伏判断或曲线值。\n\n'
+        '## 来源与版本\n\n待登记。后续条目须引用作者约定、计划或正文及其文件版本；'
+        '计划与正文实际分别记录，不把提案当作已发生事实。\n'),
+}
 
 
 def digest(path):
@@ -138,12 +171,34 @@ def atomic_write(path, data):
 def load_state(book):
     root = root_path(book)
     state = json.loads(relative_path(root, STATE).read_text(encoding='utf-8'))
+    return validate_state(root, state)
+
+
+def validate_state(root, state):
+    """Validate a live or archived state without following its chapter pointers."""
+    if not isinstance(state, dict):
+        raise ValueError('invalid state structure')
     if type(state.get('schema_version')) is not int or state['schema_version'] != 1:
         raise ValueError('unsupported schema_version')
     if not isinstance(state.get('title'), str) or not isinstance(state.get('chapters'), list) or not isinstance(state.get('pending_operations'), list):
         raise ValueError('invalid state structure')
     if 'task_management' in state and type(state['task_management']) is not bool:
         raise ValueError('task_management must be boolean')
+    if 'work_id' in state:
+        validate_directory_name(state['work_id'])
+    if 'title_status' in state:
+        if state['title_status'] not in ('unresolved', 'active'):
+            raise ValueError('invalid title_status')
+        if state['title_status'] == 'unresolved':
+            import taskctl
+            errors = taskctl.title_decision_errors(
+                state['title'], state.get('title_deferral'), work_id=state.get('work_id'))
+            if errors:
+                raise ValueError('; '.join(errors))
+            if not isinstance(state.get('title_deferral'), dict) or state['title_deferral'].get('resolution') != 'deferred':
+                raise ValueError('unresolved title requires an explicit title_deferral')
+        elif not state['title'].strip():
+            raise ValueError('active title must be nonempty')
     numbers, paths = set(), set()
     for ch in state['chapters']:
         if not isinstance(ch, dict) or type(ch.get('number')) is not int or ch['number'] < 1:
@@ -173,6 +228,15 @@ def archived(root, path):
     return ((folder / 'manifest.json').is_file() or
             (re.fullmatch(r'chapter-[0-9a-f]{32}', folder.name) is not None and
              (folder / 'journal.json').is_file()))
+
+
+def chapter_sequence_issues(chapters):
+    """Registered formal chapters use the complete reading sequence 1..N."""
+    numbers = sorted(ch['number'] for ch in chapters)
+    if numbers == list(range(1, len(numbers) + 1)):
+        return []
+    return ['chapter numbers must be continuous from 1: ' +
+            ', '.join(str(number) for number in numbers)]
 
 
 def index_destination(root, child):
@@ -276,6 +340,20 @@ def check_book(book, *, allow_pending=False, verify_snapshots=True):
                     verify_snapshot((root / name).parent)
                 except (ValueError, OSError, KeyError, TypeError) as exc:
                     issues.append('invalid snapshot: ' + name + ': ' + str(exc))
+        # Adoption archives are distinct from whole-book snapshots. Their fixed
+        # files and synchronization receipt remain evidence after pending clears.
+        for directory in all_dirs:
+            parts = Path(directory).parts
+            if (len(parts) == 2 and parts[0] == HISTORY and
+                    re.fullmatch(r'chapter-[0-9a-f]{32}', parts[1])):
+                try:
+                    import chapterctl
+                    operation_id = parts[1][len('chapter-'):]
+                    journal = chapterctl.validate_adoption_archive(root, operation_id)
+                    if journal['phase'] == 'completed' or (root / directory / 'completion.json').exists():
+                        chapterctl.validate_sync_receipt(root, operation_id)
+                except (ValueError, OSError, KeyError, TypeError) as exc:
+                    issues.append('invalid adoption archive: ' + directory + ': ' + str(exc))
         for d in all_dirs:
             folder = root / d
             if archived(root, folder):
@@ -317,6 +395,7 @@ def check_book(book, *, allow_pending=False, verify_snapshots=True):
                 except ValueError:
                     issues.append('invalid local md link/file link: ' + name + ': ' + link)
         state = load_state(root)
+        issues.extend(chapter_sequence_issues(state['chapters']))
         registered = {ch['path'] for ch in state['chapters']}
         for name in sorted(files):
             if '/' not in name and name.lower().endswith('.md') and name != '索引.md' and name not in registered:
@@ -327,6 +406,19 @@ def check_book(book, *, allow_pending=False, verify_snapshots=True):
                 issues.append('chapter sha256 mismatch: ' + ch['path'])
             if not relative_path(root, ch['review_path']).is_file():
                 issues.append('missing review: ' + ch['review_path'])
+            operation_id = ch.get('adoption_operation_id')
+            if operation_id is not None and not any(
+                    isinstance(operation, dict) and operation.get('operation_id') == operation_id
+                    for operation in state['pending_operations']):
+                try:
+                    import chapterctl
+                    receipt = chapterctl.validate_sync_receipt(root, operation_id)
+                    # Later authorized renaming/reordering retains the original
+                    # operation as provenance; its adopted bytes must still match.
+                    if receipt['draft_sha256'] != ch['sha256']:
+                        raise ValueError('completion receipt does not match current chapter')
+                except (ValueError, OSError, KeyError, TypeError) as exc:
+                    issues.append('invalid adoption completion: ' + str(operation_id) + ': ' + str(exc))
         if state['pending_operations'] and not allow_pending:
             summaries = []
             for operation in state['pending_operations']:
@@ -344,41 +436,62 @@ def check_book(book, *, allow_pending=False, verify_snapshots=True):
     return issues
 
 
-def init_book(parent, title, *, task_management=True, title_decision=None):
+def validate_directory_name(name):
+    """The work directory identifier is distinct from a book's formal title."""
+    if (not isinstance(name, str) or not name.strip() or name in ('.', '..')
+            or re.search(r'[<>:"/\\|?*\x00-\x1f]', name)
+            or name.endswith((' ', '.')) or
+            re.fullmatch(r'(?i:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])',
+                         name.split('.')[0].rstrip(' '))):
+        raise ValueError('title must be a single portable directory name (no Windows reserved names, characters or trailing space/dot)')
+
+
+def init_book(parent, title='', *, task_management=True, title_decision=None, work_id=None,
+              initial_workflow='planning'):
     if type(task_management) is not bool:
         raise ValueError('task_management must be boolean')
-    # Apply the portable filename rules before creating even the library path.
-    if (not isinstance(title, str) or not title.strip() or title in ('.', '..')
-            or re.search(r'[<>:"/\\|?*\x00-\x1f]', title)
-            or title.endswith((' ', '.')) or
-            re.fullmatch(r'(?i:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])',
-                         title.split('.')[0].rstrip(' '))):
-        raise ValueError('title must be a single portable directory name (no Windows reserved names, characters or trailing space/dot)')
+    if initial_workflow not in ('planning', 'materials', 'review_only'):
+        raise ValueError('invalid initial workflow')
+    if not task_management and initial_workflow != 'planning':
+        raise ValueError('standalone workflows require task management')
+    # All naming/deferral checks precede creation of even the library path.
+    directory = title if work_id is None else work_id
+    validate_directory_name(directory)
+    if not isinstance(title, str) or (title != '' and not title.strip()):
+        raise ValueError('title must be nonempty or explicitly deferred')
+    if title == '' and title_decision is None:
+        raise ValueError('unnamed project requires an explicit deferred title decision')
     title_record = None
     if title_decision is not None:
         # Runtime import avoids the taskctl -> novelctl module dependency cycle.
         # Validate before mkdir, including the otherwise missing library root.
         import taskctl
-        errors = taskctl.title_decision_errors(title, title_decision)
+        errors = taskctl.title_decision_errors(title, title_decision, work_id=work_id)
         if errors:
             raise ValueError('; '.join(errors))
+        naming_record = {'title': title, 'decision': title_decision}
+        if work_id is not None:
+            naming_record['work_id'] = work_id
         title_record = ('# 作者约定与授权\n\n## 初始化书名决定\n\n'
                         '以下保留本次建书的作者决定来源；资料整理可在本文件继续扩充，'
                         '须保留原话、范围及后续取代关系。\n\n```json\n' +
-                        json.dumps({'title': title, 'decision': title_decision},
-                                   ensure_ascii=False, indent=2) + '\n```\n\n'
-                        '此记录仅证明已申报的书名决定，不产生正文、设定、剧情或后续创作授权。\n')
+                        json.dumps(naming_record, ensure_ascii=False, indent=2) + '\n```\n\n'
+                        '此记录仅证明已申报的选名或明确暂缓定名，不产生正文、设定、剧情或后续创作授权。\n')
     parent = Path(parent).absolute()
     if any(item.is_symlink() for item in (parent, *parent.parents)):
         raise ValueError('symbolic link in library path')
     parent.mkdir(parents=True, exist_ok=True)
     parent = root_path(parent)
-    book = parent / title
+    book = parent / directory
     book.mkdir()  # Never overwrite an existing work.
     try:
         for directory in DIRECTORIES:
             (book / directory).mkdir()
         state = dict(schema_version=1, title=title, chapters=[], pending_operations=[])
+        if work_id is not None:
+            state.update(work_id=work_id, title_status='active' if title else 'unresolved')
+        if not title:
+            state['title_deferral'] = title_decision
         task_link = ''
         if task_management:
             state['task_management'] = True
@@ -387,9 +500,18 @@ def init_book(parent, title, *, task_management=True, title_decision=None):
             atomic_write(book / '创作约定/作者约定与授权.md', title_record)
         if task_management:
             import taskctl
-            taskctl.initialize(book)
+            if initial_workflow == 'planning':
+                taskctl.initialize(book)
+            else:
+                taskctl.initialize(book, workflow=initial_workflow)
             task_link = '- [阶段任务与验收](任务计划与验收.md)\n'
-        atomic_write(book / '创作约定/写作进度与接续说明.md', '# 写作进度与接续说明\n\n文件约定版本：1\n当前方案：待定；正式章节：无；故事时点：待定。\n作者参与与资料建设模式：待记录真实约定；尚无后续创作授权。\n\n## 交接入口\n\n- [资料索引](索引.md)\n- [全书索引](../索引.md)\n' + task_link + '\n## 待补充与下一步\n\n创作意图、语言标准与代表片段、阶段目标、故事线、人物成长与关系、近期事件、伏笔、知情与资源状态均待建立。\n独立阅读反馈与构思风险待记录。作者决定、未核实项、冲突与过期资料待核对。\n写前必读：本文件及全书索引；尚未进行正文与文学检查。\n中断更新事项以作品状态.json 的 pending_operations 为准。\n')
+        for name, content in MANAGEMENT_FILES.items():
+            target = book / name
+            target.parent.mkdir(exist_ok=True)
+            atomic_write(target, content)
+        management_links = ''.join('- [' + Path(name).stem + '](../' + name + ')\n'
+                                   for name in MANAGEMENT_FILES)
+        atomic_write(book / '创作约定/写作进度与接续说明.md', '# 写作进度与接续说明\n\n文件约定版本：1\n当前方案：待定；正式章节：无；故事时点：待定。\n作者参与与资料建设模式：待记录真实约定；尚无后续创作授权。\n\n## 交接入口\n\n- [资料索引](索引.md)\n- [全书索引](../索引.md)\n' + task_link + management_links + '\n## 待补充与下一步\n\n创作意图、语言标准与代表片段、阶段目标、故事线、人物成长与关系、近期事件、伏笔、知情与资源状态均待建立。\n独立阅读反馈与构思风险待记录。作者决定、未核实项、冲突与过期资料待核对。\n写前必读：本文件及全书索引；尚未进行正文与文学检查。\n中断更新事项以作品状态.json 的 pending_operations 为准。\n')
         index_book(book)
     except Exception:
         # Only remove the directory this invocation created. An existing work
@@ -512,7 +634,16 @@ def restore_book(book, snapshot):
         shutil.copytree(payload, stage, dirs_exist_ok=True)
         if inventory(stage) != inventory(payload):
             raise ValueError('staging verification failed')
-        backup = snapshot_book(root, 'pre-restore')
+        try:
+            load_state(root)
+        except (ValueError, OSError, TypeError, KeyError, AttributeError):
+            # A broken/missing live state is a reason to restore, not a reason
+            # to reject a verified snapshot. The original complete directory
+            # is preserved by the rename below; do not manufacture an invalid
+            # formal snapshot or weaken verify_snapshot to accept this scene.
+            backup = None
+        else:
+            backup = snapshot_book(root, 'pre-restore')
         shutil.copytree(root / HISTORY, stage / HISTORY)
         os.rename(root, recovery)
         try:
@@ -521,7 +652,7 @@ def restore_book(book, snapshot):
             os.rename(recovery, root)
             raise
         # Recovery is intentionally kept: no destructive cleanup in commit path.
-        return root / backup.relative_to(root), recovery
+        return (root / backup.relative_to(root) if backup is not None else recovery), recovery
     finally:
         if stage.exists():
             shutil.rmtree(stage)
@@ -530,7 +661,11 @@ def restore_book(book, snapshot):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest='command', required=True)
-    p = sub.add_parser('init'); p.add_argument('--parent', required=True); p.add_argument('--title', required=True)
+    p = sub.add_parser('init'); p.add_argument('--parent', required=True)
+    p.add_argument('--title', default='', help='author-selected formal title; omit only with explicit deferral')
+    p.add_argument('--work-id', help='portable neutral directory identifier, separate from the formal title')
+    p.add_argument('--workflow', choices=['planning', 'materials', 'review_only'], default='planning',
+                   help='initial authorized task; materials and review_only do not begin novel writing')
     p.add_argument('--title-decision', required=True,
                    help='actual author title decision: JSON object, JSON-file path or @file')
     for command in ('index', 'check', 'export', 'snapshot', 'restore'):
@@ -547,7 +682,8 @@ def main(argv=None):
                         json.loads(Path(raw[1:] if raw.startswith('@') else raw).read_text(encoding='utf-8-sig')))
             if not isinstance(decision, dict):
                 raise ValueError('title decision must be a JSON object')
-            print(init_book(args.parent, args.title, title_decision=decision))
+            print(init_book(args.parent, args.title, title_decision=decision, work_id=args.work_id,
+                            initial_workflow=args.workflow))
         elif args.command == 'index': index_book(args.book)
         elif args.command == 'check':
             issues = check_book(args.book, verify_snapshots=not args.skip_snapshots)
@@ -558,6 +694,8 @@ def main(argv=None):
         elif args.command == 'restore':
             backup, recovery = restore_book(args.book, args.snapshot)
             print('backup: ' + str(backup) + '\nrecovery: ' + str(recovery))
+            if backup == recovery:
+                print('backup_kind: raw_recovery (original files; not a verified snapshot)')
         return 0
     except (ValueError, OSError, KeyError, TypeError) as exc:
         print('error: ' + str(exc), file=__import__('sys').stderr)

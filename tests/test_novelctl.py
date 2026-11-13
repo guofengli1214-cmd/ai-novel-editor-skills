@@ -171,6 +171,84 @@ class NovelctlTests(unittest.TestCase):
         self.assertEqual(n.load_state(self.book), state)
         self.assertEqual(n.check_book(self.book), [])
 
+    def test_restore_damaged_live_state_preserves_complete_raw_scene(self):
+        original_state = n.load_state(self.book)
+        marker = self.book / '人物/恢复标记.bin'
+        marker.write_bytes(b'original fixture')
+        n.index_book(self.book)
+        snap = n.snapshot_book(self.book, '有效恢复来源')
+        invalid_states = [b'{ malformed state', None, b'[]',
+                          b'{"schema_version":1,"title":"fixture","chapters":{}}']
+        for index, content in enumerate(invalid_states):
+            with self.subTest(content=content):
+                marker.write_bytes(b'fault scene\x00' + bytes([index]))
+                if content is None:
+                    (self.book / n.STATE).unlink()
+                else:
+                    (self.book / n.STATE).write_bytes(content)
+                before = n.inventory(self.book)
+                backup, recovery = n.restore_book(self.book, snap)
+                self.assertEqual(backup, recovery)
+                self.assertEqual(n.inventory(recovery), before)
+                self.assertEqual((recovery / marker.relative_to(self.book)).read_bytes(),
+                                 b'fault scene\x00' + bytes([index]))
+                if content is None:
+                    self.assertFalse((recovery / n.STATE).exists())
+                else:
+                    self.assertEqual((recovery / n.STATE).read_bytes(), content)
+                self.assertEqual(n.load_state(self.book), original_state)
+                self.assertEqual(marker.read_bytes(), b'original fixture')
+                self.assertEqual(n.check_book(self.book), [])
+                n.verify_snapshot(snap)
+                with self.assertRaisesRegex(ValueError, 'not a snapshot'):
+                    n.verify_snapshot(backup)
+
+    def test_restore_damaged_state_failed_commit_reinstates_exact_scene(self):
+        snap = n.snapshot_book(self.book, '有效恢复来源')
+        (self.book / n.STATE).write_bytes(b'{ broken state\r\n')
+        (self.book / '人物/故障附件.bin').write_bytes(b'preserve\x00raw\xff')
+        before = n.inventory(self.book)
+        original_rename = n.os.rename
+        calls = []
+
+        def fail_commit(src, dst):
+            calls.append((src, dst))
+            if len(calls) == 2:
+                raise OSError('injected damaged-state commit failure')
+            return original_rename(src, dst)
+
+        with patch.object(n.os, 'rename', side_effect=fail_commit):
+            with self.assertRaisesRegex(OSError, 'damaged-state commit failure'):
+                n.restore_book(self.book, snap)
+        self.assertEqual(n.inventory(self.book), before)
+        self.assertEqual((self.book / n.STATE).read_bytes(), b'{ broken state\r\n')
+        n.verify_snapshot(snap)
+
+    def test_restore_cli_labels_raw_backup(self):
+        snap = n.snapshot_book(self.book, '有效恢复来源')
+        (self.book / n.STATE).unlink()
+        proc = subprocess.run([sys.executable, str(SCRIPTS / 'novelctl.py'), 'restore',
+                               '--book', str(self.book), '--snapshot', str(snap)],
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn('backup_kind: raw_recovery', proc.stdout)
+        self.assertEqual(n.check_book(self.book), [])
+
+    def test_check_requires_chapters_to_cover_continuous_numbers_from_one(self):
+        state = n.load_state(self.book)
+        for numbers in ((2,), (1, 3), (3, 1, 2)):
+            with self.subTest(numbers=numbers):
+                state['chapters'] = [self.chapter(number, '机械检查夹具') for number in numbers]
+                self.state(state)
+                n.index_book(self.book)
+                before = n.inventory(self.book)
+                issues = n.check_book(self.book)
+                if numbers == (3, 1, 2):
+                    self.assertEqual(issues, [])
+                else:
+                    self.assertIn('chapter numbers must be continuous from 1', '\n'.join(issues))
+                self.assertEqual(n.inventory(self.book), before)
+
     def test_corrupt_snapshot_does_not_touch_book(self):
         snap = n.snapshot_book(self.book, '损坏测试')
         (snap / 'payload/索引.md').write_text('篡改', encoding='utf-8')
@@ -250,8 +328,18 @@ class NovelctlTests(unittest.TestCase):
     def test_chapter_journals_are_immutable_without_indexes(self):
         archive = self.book / n.HISTORY / ('chapter-' + 'a' * 32)
         archive.mkdir()
-        (archive / 'journal.json').write_text('{"phase":"adopted"}', encoding='utf-8')
         (archive / 'draft.md').write_text('采用备份 [不属于当前资料的链接](missing.md)', encoding='utf-8')
+        # Use a valid legacy archive: ordinary link checks still skip archived
+        # prose, while adoption-specific checks verify its recovery evidence.
+        backup = archive.relative_to(self.book).as_posix()
+        (archive / 'state.json').write_text(json.dumps(n.load_state(self.book)), encoding='utf-8')
+        journal = dict(operation_id='a' * 32, kind='chapter_adopt', phase='prepared',
+                       number=1, target='第0001章.md', draft_sha256=n.digest(archive / 'draft.md'),
+                       backup=backup, state_backup=backup + '/state.json', draft_backup=backup + '/draft.md',
+                       original_sha256=None, review_hashes={'审稿与修订/1.json': '0' * 64},
+                       request=dict(number=1, target='第0001章.md', expected_sha256=None,
+                                    reviews=['审稿与修订/1.json']))
+        (archive / 'journal.json').write_text(json.dumps(journal), encoding='utf-8')
         before = n.inventory(archive)
         for _ in range(2):
             n.index_book(self.book)

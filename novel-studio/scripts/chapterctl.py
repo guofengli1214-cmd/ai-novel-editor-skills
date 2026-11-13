@@ -275,6 +275,124 @@ def evidence_file(root, value, label):
     return path
 
 
+def journal_digest(journal):
+    """The phase may advance after installation; all other journal data is fixed."""
+    stable = {key: value for key, value in journal.items() if key != 'phase'}
+    return hashlib.sha256(json.dumps(stable, ensure_ascii=False, sort_keys=True,
+                                     separators=(',', ':')).encode('utf-8')).hexdigest()
+
+
+def validate_adoption_archive(root, operation_id, pending=None):
+    """Validate new checksum archives and the hashes available in legacy journals.
+
+    No live chapter, review or material file is read: a later legitimate revision
+    must not invalidate an earlier operation's immutable recovery evidence.
+    """
+    require(isinstance(operation_id, str) and re.fullmatch('[0-9a-f]{32}', operation_id),
+            'invalid adoption operation_id')
+    base = nc.HISTORY + '/chapter-' + operation_id
+    archive = nc.relative_path(root, base)
+    journal = read_json(file_path(root, base + '/journal.json'))
+    require(journal.get('operation_id') == operation_id and journal.get('kind') == 'chapter_adopt',
+            'adoption journal identity mismatch')
+    require(journal.get('phase') in ('prepared', 'adopted', 'completed'), 'invalid adoption journal phase')
+    require(journal.get('backup') == base and journal.get('state_backup') == base + '/state.json'
+            and journal.get('draft_backup') == base + '/draft.md', 'adoption backup paths mismatch')
+    number, target, sha = journal.get('number'), journal.get('target'), journal.get('draft_sha256')
+    require(type(number) is int and number > 0, 'invalid archived chapter number')
+    destination = nc.relative_path(root, target)
+    require(destination.parent == root and destination.suffix.lower() == '.md'
+            and destination.name != '索引.md', 'invalid archived chapter target')
+    require(isinstance(sha, str) and re.fullmatch('[0-9a-f]{64}', sha), 'invalid archived draft hash')
+    req = obj(journal.get('request'))
+    require(req.get('number') == number and req.get('target') == target,
+            'archived request chapter mismatch')
+    require(journal.get('task_stage') == req.get('task_stage'), 'archived request stage mismatch')
+    require(req.get('expected_sha256') == journal.get('original_sha256'),
+            'archived expected chapter hash mismatch')
+    hashes = obj(journal.get('review_hashes'))
+    require(isinstance(req.get('reviews'), list) and bool(hashes)
+            and set(hashes) == set(req['reviews'])
+            and all(isinstance(value, str) and re.fullmatch('[0-9a-f]{64}', value)
+                    for value in hashes.values()), 'invalid archived review hashes')
+    require(nc.digest(file_path(root, base + '/draft.md')) == sha, 'archived draft hash mismatch')
+    prior = nc.validate_state(root, read_json(file_path(root, base + '/state.json')))
+    require(not prior['pending_operations'], 'archived prior state already has pending operations')
+    old = next((chapter for chapter in prior['chapters'] if chapter['number'] == number), None)
+    expected_files = {'state.json', 'draft.md'}
+    if journal.get('original_sha256') is None:
+        require(old is None and not (archive / 'original.md').exists(),
+                'new chapter archive contains an original chapter')
+    else:
+        require(old is not None and old['path'] == target
+                and old['sha256'] == journal['original_sha256'], 'archived original state mismatch')
+        require(nc.digest(file_path(root, base + '/original.md')) == journal['original_sha256'],
+                'archived original hash mismatch')
+        expected_files.add('original.md')
+    manifest_path = archive / 'archive.json'
+    if journal.get('archive_version') is not None or manifest_path.exists():
+        require(journal.get('archive_version') == 1, 'invalid adoption archive_version')
+        manifest = read_json(file_path(root, base + '/archive.json'))
+        require(manifest.get('schema_version') == 1 and manifest.get('kind') == 'chapter_adoption_archive'
+                and manifest.get('operation_id') == operation_id, 'invalid adoption archive manifest')
+        files = obj(manifest.get('files'))
+        require(set(files) == expected_files, 'adoption archive manifest file set mismatch')
+        for name, expected in files.items():
+            require(nc.digest(file_path(root, base + '/' + name)) == expected,
+                    'adoption archive file hash mismatch: ' + name)
+        require(manifest.get('journal_sha256') == journal_digest(journal),
+                'adoption journal does not match fixed manifest')
+    if pending is not None:
+        require(journal_digest(journal) == journal_digest(obj(pending)),
+                'adoption journal does not match pending operation')
+        require(pending.get('phase') in ('prepared', 'adopted'), 'invalid pending adoption phase')
+        require(not (pending['phase'] == 'prepared' and journal['phase'] != 'prepared'),
+                'adoption journal is ahead of pending operation')
+    return journal
+
+
+def validate_sync_receipt(root, operation_id):
+    """Return immutable finish evidence without consulting taskctl or live materials."""
+    journal = validate_adoption_archive(root, operation_id)
+    base = journal['backup']
+    receipt = read_json(file_path(root, base + '/completion.json'))
+    require(receipt.get('schema_version') == 1 and receipt.get('kind') == 'chapter_sync_completed',
+            'invalid synchronization completion receipt')
+    for key in ('operation_id', 'number', 'target', 'draft_sha256', 'task_stage'):
+        require(receipt.get(key) == journal.get(key), 'synchronization receipt mismatch: ' + key)
+    require(journal['phase'] in ('adopted', 'completed'), 'completed synchronization requires adopted journal')
+    require(receipt.get('journal_sha256') == journal_digest(journal),
+            'synchronization receipt journal hash mismatch')
+    manifest = nc.relative_path(root, base + '/archive.json')
+    require(receipt.get('archive_manifest_sha256') == (nc.digest(manifest) if manifest.exists() else None),
+            'synchronization receipt archive hash mismatch')
+    record_ref = obj(receipt.get('change_record'))
+    require(record_ref.get('path') == base + '/synchronization.json',
+            'synchronization receipt requires the fixed change record copy')
+    record = read_json(evidence_file(root, record_ref, 'archived synchronization record'))
+    require(record.get('draft_sha256') == journal['draft_sha256'],
+            'archived synchronization draft mismatch')
+    require(receipt.get('source_change_record') == dict(path=journal['request']['change_record'],
+                                                      sha256=record_ref['sha256']),
+            'synchronization source record mismatch')
+    return receipt
+
+
+def save_fixed(path, data):
+    """A retry may reuse identical durable output, but never replace old evidence."""
+    encoded = data if isinstance(data, bytes) else data.encode('utf-8')
+    if path.exists():
+        require(path.read_bytes() == encoded, 'fixed adoption evidence already differs: ' + path.name)
+    else:
+        nc.atomic_write(path, encoded)
+        if os.name != 'nt':
+            fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+
+
 def legacy_scope_consistent(review):
     """Only compare explicit version fields, never claim to parse prose."""
     scope = review.get('version_scope')
@@ -445,6 +563,9 @@ def _adopt(root, req):
         require(target.is_file() and nc.digest(target) == old['sha256'] == req.get('expected_sha256'), 'old chapter changed or stale expected_sha256')
     else:
         require(req.get('expected_sha256', 'missing') is None and not target.exists(), 'new chapter requires null expected_sha256 and absent target')
+    sequence_issues = nc.chapter_sequence_issues(
+        [ch for ch in state['chapters'] if ch['number'] != number] + [dict(number=number)])
+    require(not sequence_issues, '; '.join(sequence_issues))
     writer = obj(req.get('writer'))
     require(all(nonempty(writer.get(k)) for k in ('task_id', 'agent_id')), 'invalid writer identity')
     auth = obj(req.get('authorization'))
@@ -478,16 +599,22 @@ def _adopt(root, req):
                    review_hashes={name: nc.digest(file_path(root, name)) for name in reviews},
                    backup=backup_rel, original_sha256=old['sha256'] if old else None,
                    state_backup=backup_rel + '/state.json',
-                   draft_backup=backup_rel + '/draft.md', phase='prepared')
+                   draft_backup=backup_rel + '/draft.md', phase='prepared', archive_version=1)
     if task_stage is not None:
         pending['task_stage'] = task_stage
     save(backup / 'journal.json', pending)
+    names = ['state.json', 'draft.md'] + (['original.md'] if old else [])
+    save(backup / 'archive.json', dict(schema_version=1, kind='chapter_adoption_archive',
+                                     operation_id=operation,
+                                     files={name: nc.digest(backup / name) for name in names},
+                                     journal_sha256=journal_digest(pending)))
     state['pending_operations'] = [pending]
     save(root / nc.STATE, state)
     # Once pending is durable, failures are deliberately left recoverable.
     nc.atomic_write(target, data)
     entry = dict(old or {})
     entry.update(number=number, path=req['target'], sha256=sha,
+                 adoption_operation_id=operation,
                  writer_task=writer['task_id'], writer_agent=writer['agent_id'],
                  review_path=reviews[0], reviewer_task=reviewers[0]['task_id'],
                  review_paths=reviews, reviewers=reviewers, authorization=auth,
@@ -515,6 +642,7 @@ def finish(book, request):
         p = obj(pending[0])
         require(p.get('kind') == 'chapter_adopt' and p.get('operation_id') == request.get('operation_id'), 'operation mismatch')
         require(p.get('phase') == 'adopted', 'interrupted adoption requires recovery')
+        journal = validate_adoption_archive(root, p['operation_id'], pending=p)
         ch = next((c for c in state['chapters'] if c['number'] == p['number']), None)
         require(ch and ch['path'] == p['target'] and ch['sha256'] == p['draft_sha256'], 'chapter not installed')
         require(nc.digest(file_path(root, p['target'])) == p['draft_sha256'], 'chapter hash mismatch')
@@ -560,9 +688,35 @@ def finish(book, request):
         import taskctl
         taskctl.require_sync(root, p)
         require(nc.inventory(root) == before, 'book changed during finish')
+        # Install fixed completion evidence before clearing pending. If clearing
+        # state fails, the same finish request can reuse these identical files.
+        backup = nc.relative_path(root, p['backup'])
+        if journal['phase'] == 'prepared':
+            save(backup / 'journal.json', p)
+        record_path = file_path(root, req['change_record'])
+        save_fixed(backup / 'synchronization.json', record_path.read_bytes())
+        record_ref = dict(path=p['backup'] + '/synchronization.json',
+                          sha256=nc.digest(backup / 'synchronization.json'))
+        manifest = backup / 'archive.json'
+        receipt = dict(schema_version=1, kind='chapter_sync_completed',
+                       **{key: p.get(key) for key in
+                          ('operation_id', 'number', 'target', 'draft_sha256', 'task_stage')},
+                       journal_sha256=journal_digest(p),
+                       archive_manifest_sha256=nc.digest(manifest) if manifest.exists() else None,
+                       change_record=record_ref,
+                       source_change_record=dict(path=req['change_record'], sha256=record_ref['sha256']))
+        save_fixed(backup / 'completion.json', json.dumps(receipt, ensure_ascii=False, indent=2) + '\n')
+        validate_sync_receipt(root, p['operation_id'])
+        # A durable terminal phase lets later checks detect deletion of an old
+        # receipt even after another operation replaces this chapter.
+        if journal['phase'] != 'completed':
+            completed = dict(p, phase='completed')
+            save(backup / 'journal.json', completed)
         state['pending_operations'] = []
         save(root / nc.STATE, state)
-        return dict(ok=True, operation_id=p['operation_id'], pending=False, draft_sha256=p['draft_sha256'])
+        return dict(ok=True, operation_id=p['operation_id'], pending=False, draft_sha256=p['draft_sha256'],
+                    completion=dict(path=p['backup'] + '/completion.json',
+                                    sha256=nc.digest(backup / 'completion.json')))
 
 
 def check(book, *, verify_snapshots=True):

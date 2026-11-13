@@ -129,8 +129,11 @@ class EditorialGateTests(unittest.TestCase):
     def accept_recheck(self):
         self.done('S02', 'recheck', [self.ev(path) for path in self.req['reviews']] + [self.ev(self.prose_path)],
                   inputs=[self.draft])
+        tc.update(self.root, dict(stage='S02', task='adopt', status='doing'))
 
-    def synchronize(self, operation):
+    def prepare_sync(self, operation):
+        self.done('S02', 'adopt', [self.ev(self.req['target'])], operation_id=operation['operation_id'])
+        tc.update(self.root, dict(stage='S02', task='sync', status='doing'))
         self.write('创作约定/交接.md', '技术夹具：第0001章已采用；待验收同步与后续计划。')
         self.write('摘要/技术摘要.md', '机械测试摘要。')
         self.write('历史版本/采用记录.md', '机械测试采用记录。')
@@ -143,7 +146,9 @@ class EditorialGateTests(unittest.TestCase):
             checked_sources=[self.req['target']], updated_files=[self.ev(paths[0]) for paths in categories.values()],
             category_files=categories, handoff=dict(path='创作约定/交接.md', chapter=1)))
         nc.index_book(self.root)
-        self.done('S02', 'adopt', [self.ev(self.req['target'])], operation_id=operation['operation_id'])
+
+    def synchronize(self, operation):
+        self.prepare_sync(operation)
         cc.finish(self.root, operation)
         self.done('S02', 'sync', [self.ev(self.req['change_record'])])
 
@@ -199,6 +204,7 @@ class EditorialGateTests(unittest.TestCase):
         del data['stages'][0]['direction_gate_version']
         del data['stages'][0]['decision_gate_version']
         del data['stages'][0]['execution_gate_version']
+        data['stages'][0].pop('result_gate_version', None)
         tc.save(self.root, data)
         self.assertTrue(tc.check(self.root)['ok'])
         self.done('S01', 'direction', checks={})

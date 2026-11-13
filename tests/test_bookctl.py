@@ -74,6 +74,19 @@ class BookTests(unittest.TestCase):
         self.assertEqual([ch['number'] for ch in self.record['chapters']], [1, 2])
         self.assertEqual(before, nc.inventory(self.root))
 
+    def test_gapped_formal_numbers_block_manifest_and_finalization(self):
+        state = nc.load_state(self.root)
+        state['chapters'][0]['number'] = 3
+        self.save_json(nc.STATE, state)
+        self.record['chapters'] = self.current_chapters()
+        self.save_record()
+        before = nc.inventory(self.root)
+        for operation in (bc.manifest, bc.check):
+            with self.subTest(operation=operation.__name__):
+                with self.assertRaisesRegex(ValueError, 'continuous from 1'):
+                    operation(self.root)
+        self.assertEqual(nc.inventory(self.root), before)
+
     def test_default_manifest_and_final_check_reject_bad_snapshot(self):
         snapshot = nc.snapshot_book(self.root, '快照校验回归夹具')
         (snapshot / 'payload/第0001章.md').write_text('损坏的归档正文。', encoding='utf-8')
@@ -179,9 +192,9 @@ class BookTests(unittest.TestCase):
         self.record['chapters'] = self.current_chapters()
         self.save_record()
         state = nc.load_state(self.root)
-        state['chapters'] = [ch for ch in state['chapters'] if ch['number'] != 2]
+        state['chapters'] = [ch for ch in state['chapters'] if ch['number'] != 3]
         self.save_json(nc.STATE, state)
-        (self.root / '第0002章.md').unlink()
+        (self.root / '第0003章.md').unlink()
         nc.index_book(self.root)
         self.assertTrue(cc.check(self.root)['ok'])
         with self.assertRaisesRegex(ValueError, 'chapters do not match'):
@@ -189,7 +202,8 @@ class BookTests(unittest.TestCase):
 
     def test_actual_chapter_renumbering_invalidates_record(self):
         state = nc.load_state(self.root)
-        state['chapters'][0]['number'] = 3
+        first, second = state['chapters']
+        first['number'], second['number'] = second['number'], first['number']
         self.save_json(nc.STATE, state)
         self.assertTrue(cc.check(self.root)['ok'])
         with self.assertRaisesRegex(ValueError, 'chapters do not match'):
