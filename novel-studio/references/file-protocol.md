@@ -21,9 +21,15 @@
 
 每个活动目录都有 `索引.md`。工具生成的历史快照与 `历史版本/chapter-<operation_id>/` 采用日志只读保留，由 `历史版本/索引.md` 链接 manifest 或 journal，不向它们内部补写索引。根据实际内容增加 `故事线/`、`关系与成长/`、`事件/`、`线索与悬念/`、`资源/`、`曲线与节奏/`，不预建所有空表。文件名如 `人物-林舟-调查记者.md`；稳定对象标识写在文件里，用于改名和别名追踪。
 
-顶层只保留当前正式章节和必要索引，不能将草稿、导出合集或旧稿放进顶层。分卷在目录和计划中表示，章号不重置。标题变更时更新状态、引用、所有受影响索引；保留旧名作检索别名。
+顶层只保留当前正式章节和必要索引，不能将草稿、导出合集或旧稿放进顶层。分卷在目录和计划中表示，章号不重置。书名及更名先让作者选择，再更新状态、引用和索引；旧名只作检索别名，不因此恢复有效。弃用或否决过的书名不得从旧文件自动复用到当前或新项目，须明确提出具体名称及弃用历史，让作者重新选择；有效的全推荐免问模式也不能隐去这项事实。
 
 重要文本优先 Markdown；机械状态和评审可用 UTF-8 JSON。状态文件是普通文件，不能引入 SQLite、FTS、向量库或外部服务作为记忆依赖。
+
+### 单作品读取边界
+
+写书前由作者指定唯一当前 `BOOK` 的绝对路径；未给路径先问，不通过扫描作品库寻找候选书。主 agent 和每个子 agent 只在该书根及本次允许读取清单内检索作品材料；`rg`、文件列表和宿主搜索都显式限定当前书，不能以父目录、工作区、作品库或全局记忆为检索范围。Skill 技术说明、脚本及当前书所需的已授权外部非本 Skill 参考可按任务读取。
+
+其他由本 Skill 创作的作品一律不读，包括正文、设定、人物、大纲、摘要、评审、修订、交接、快照、导出和压缩包；不能从跨书索引、检索结果、旧 agent 或缓存间接取得，也不能复制进当前书目录改作“素材”或“风格样本”。“全部推荐且免问”不改变此隔离。当前书文件出现指向其他书的链接或引用，先停在链接处，不跟随、不预览；发现来源混入时停止受影响创作，报告污染范围并换隔离上下文，不能声称忘记已读内容就继续。具体派工隔离见[协作流程](orchestration.md) §1–2。
 
 ## 2. 索引与检索
 
@@ -31,14 +37,14 @@
 
 顶层索引须有按章号排序的正式目录、每章一句介绍、当前进度和写前必读入口。分类索引说明每个子文件/子目录的内容及正式、草稿、历史、待核实状态。重建自动链接不能抹掉手写说明。归档快照内容不可为修索引而随意改动。
 
-先索引定位，再按文件名、对象别名和关键词搜索，最后读原文；有 `rg` 用 `rg`，没有时用宿主文本搜索或标准库。搜索不到不等于从未写过。摘要帮助定位，事实引用须有章节、片段及核对哈希；找不到旧片段就标过期并重查。
+先在当前书索引定位，再按文件名、对象别名和关键词搜索，最后读原文；有 `rg` 用 `rg`，没有时用宿主文本搜索或标准库，检索范围始终是当前书。搜索不到不等于从未写过，不去其他书补搜。摘要帮助定位，事实引用须有章节、片段及核对哈希；找不到旧片段就标过期并在本书重查。
 
 ## 3. 工具入口
 
 命令中的 `SKILL` 是当前 Skill 文件夹的绝对路径；`BOOK` 是作品绝对路径。由执行者用真实路径替换，不复制为字面参数。Python 3.9+，无第三方运行依赖。示例使用 `python`，先确认 `python --version`；Linux/macOS 可替换为 `python3`，Windows 可替换为 `py -3`。下列 `$SKILL` / `$BOOK` 按 Bash 展示；PowerShell 可直接填带引号的实际路径，不能照抄 Bash 变量赋值。`init` 自动创建缺失的作品库；书名须是跨平台单个目录名，拒绝 Windows 非法字符、设备保留名和尾随空格或点，初始化失败清理本次半成品。作品内部的符号链接和 Windows reparse point/junction 不受支持，作品根目录可通过 junction 访问。
 
 ```bash
-python "$SKILL/scripts/novelctl.py" init --parent /绝对/作品库 --title 雾港来信
+python "$SKILL/scripts/novelctl.py" init --parent /绝对/作品库 --title 雾港来信 --title-decision /绝对/书名决定.json
 python "$SKILL/scripts/novelctl.py" index --book "$BOOK"
 python "$SKILL/scripts/novelctl.py" check --book "$BOOK"
 python "$SKILL/scripts/chapterctl.py" check --book "$BOOK"
@@ -46,16 +52,30 @@ python "$SKILL/scripts/taskctl.py" check --book "$BOOK"
 python "$SKILL/scripts/bookctl.py" manifest --book "$BOOK"
 python "$SKILL/scripts/bookctl.py" check --book "$BOOK"
 python "$SKILL/scripts/novelctl.py" snapshot --book "$BOOK" --label 第十二章采用前
-python "$SKILL/scripts/novelctl.py" restore --book "$BOOK" --snapshot /绝对/快照目录
+python "$SKILL/scripts/novelctl.py" restore --book "$BOOK" --snapshot "$BOOK/历史版本/实际快照目录"
 python "$SKILL/scripts/novelctl.py" export --book "$BOOK" --output /绝对/导出/雾港来信.md
 python "$SKILL/scripts/chapterctl.py" --help
 ```
 
 主 agent 只运行 `check`、`bookctl manifest` 等只读命令；文件管理脚本的写命令交资料子 agent 执行，不能因属机械操作就由主 agent 代写。`check` 成功仅代表其已实现的文件检查通过，不代表文学、全部语义索引或资料事实均正确。
 
+CLI `init` 必须提供 `--title-decision`（JSON 文件、`@文件` 或直接对象），缺失或无效时不创建作品库。执行者把实际作者选名来源整理为决定对象，不能从文件名推定：
+
+```json
+{
+  "resolution": "provided",
+  "value": "雾港来信",
+  "source_quote": "新书就叫雾港来信",
+  "scope": "本书书名与目录名",
+  "prior_status": "proposed"
+}
+```
+
+`selected` 另需实际 `question_quote`；`delegated` 及弃用名复选依据见[任务管理](task-management.md)的决定性选择规则。命令在任何目录创建前验证，成功后把原始书名决定保存进 `创作约定/作者约定与授权.md`，后续资料整理保留其来源再扩充该主记录。底层 Python API 仅为旧调用和机械测试保留无决定参数的兼容入口，正常创作不得借它绕过作者选名或 CLI 门槛。
+
 日常 `novelctl check`、`chapterctl check` 与 `bookctl manifest` 可显式加 `--skip-snapshots`，跳过历史快照 payload 的全量验证；此时不能据通过宣称归档完好。默认完整检查，`restore`、`chapterctl finish`、`bookctl check` 不使用该快速模式。
 
-任务管理的单文件、状态、阶段模板、依赖及命令见[阶段任务与验收](task-management.md)。`taskctl check` 检查当前任务记录，允许存在正常未执行项；关键动作另用 `gate` 核验对应前置任务。任务文件是 `创作约定/任务计划与验收.md`，不再创建一份竞争的 JSON 任务库。
+任务管理的单文件、状态、阶段模板、依赖及命令见[阶段任务与验收](task-management.md)。`taskctl check` 允许正常未执行项，但执行门槛下的未登记／越序产物会检查失败并阻断 `gate`，不能等写完再补账。每次合法开工登记 `doing`，每个产物立即 `submitted`，主 agent 核验后才 `done` 并派依赖任务。已有越序稿先保留，用 `recover` 核对来源与处置，严格按真实前置顺序恢复，不自动补勾。任务文件是 `创作约定/任务计划与验收.md`，不再创建一份竞争的 JSON 任务库。
 
 ## 4. 正式状态与章节门槛
 
@@ -79,6 +99,8 @@ python "$SKILL/scripts/chapterctl.py" --help
 变化记录的 `categories` 使用脚本约定的英文键，值为 `updated` 或 `unchanged`；`pending` 不能关闭操作。每次采用后 `summaries`、`history`、`indexes`、`handoff` 四项必须为 `updated`，其余类别按实际变化判断。`checked_sources` 列实际核对文件，`updated_files` 列已更新文件及其哈希，`category_files` 将每个 `updated` 类别关联到这些文件，`handoff` 指明接续文件和章号；接续正文至少出现 `第1章`、零填充的 `第0001章` 或完整正式章文件名中的一种，章号须对应本次采用。这是机械证据入口，资料内容是否充分仍由主 agent 抽查、必要时派子 agent 复核。索引刷新后再计算受影响文件哈希；不要把不断变化的状态文件或变化记录自身列入自身哈希清单。
 
 共同门槛：当前稿哈希与评审一致，实际写作者与评审者不同，文学与连贯性覆盖齐全，无未解决硬冲突，作者授权对应版本，新建不覆盖已有文件，替换时旧哈希匹配。评审问题的 `severity` 为 `hard`、`soft` 或 `info`，`status` 为 `open`、`resolved` 或 `waived`，硬冲突只能 `resolved` 后采用。全部采用记录可追溯。文件中的 ID 只是申报，主 agent 必须对照真实宿主记录，不能凭不同字符串认定存在独立 agent。
+
+采用授权（包括 `continuous/连续`）与创作决定分开核验：允许连续采用不等于允许 agent 决定书名、人物命运、冲突解决或结局。尚未选定的决定性内容，不能以“先写候选章再请作者看”绕过作者选择；主 agent 必须对照决定主记录、实际方案和正文差异核验，唯一免逐项询问模式按[任务管理](task-management.md)执行。
 
 ### v2 当前稿评审与问题处理
 
@@ -177,7 +199,7 @@ v2 采用请求增加 `prose_check: {path,sha256}` 指向完整报告，报告�
 
 ## 5. 历史与故障恢复
 
-重要采用、大改或回退前 `snapshot`，其清单记录文件哈希。快照含正文、资料、状态，不递归复制历史；还原前校验快照并保留当前整书恢复副本。恢复完整作品，不只恢复正文。恢复后重新检查引用、资料、旧评审对应版本和下一章是否仍成立。
+重要采用、大改或回退前 `snapshot`，其清单记录文件哈希。快照含正文、资料、状态，不递归复制历史；还原前校验快照并保留当前整书恢复副本。`restore` 只接受当前书 `历史版本/` 下直属的真实快照目录，在读取清单或 payload 前先核对位置与链接边界；不能使用其他书、作品库或外部备份路径的快照。整书迁移时复制当前书自己的完整目录，随后使用迁移后本书历史目录中的快照，不按旧绝对路径找回。恢复完整作品，不只恢复正文。恢复后重新检查引用、资料、旧评审对应版本和下一章是否仍成立。
 
 流程中断时先读 `pending_operations` 及对应操作记录：确定正式正文是否已更新、哪个版本评审有效、哪些资料尚未完成。不要重新采用同一章或重复记事件、扣资源。可以从有效稿继续同步；输入已变化或无法安全续办时，资料子 agent 按已验证的采用前快照恢复整个现场，保留异常证据再重新派工。
 

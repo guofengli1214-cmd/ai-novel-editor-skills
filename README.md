@@ -5,7 +5,6 @@
 > A skill for writing book-length fiction with real sub-agents. The orchestrating agent never writes prose: drafting, worldbuilding records and per-chapter review are delegated to separate sub-agents, and all story memory lives in plain files, so you can resume the novel in any other agent tool.
 
 - 实现入口：[`novel-studio/SKILL.md`](novel-studio/SKILL.md)
-- 需求基线：[`需求文档.md`](需求文档.md)
 - 使用说明：[`使用说明.md`](使用说明.md)
 - 验证记录：[`验证记录.md`](验证记录.md)
 
@@ -55,7 +54,7 @@
 ```
 
 1. **进入现场**：读顶层 `索引.md`、`创作约定/写作进度与接续说明.md`、`作品状态.json`、`任务计划与验收.md`；检查未完成操作、任务依赖、手工修改、正文版本与评审状态。
-2. **理解与规划**：恢复作者目标、章长、详略、语言、阅读期待及授权，补问会改变交付的未知项；区分先建设定、边写边补、混合三种开书方式。需要时做**同场景两种叙述方案对照试写**，记录选择的适用范围，不把单章声音自动推广全书。
+2. **理解与规划**：恢复作者目标、章长、详略、语言、阅读期待及已定选择，区分先建设定、边写边补、混合三种开书方式。缺决定性选择且无覆盖该项的有效免问记录时，先补问并等待，不边问边派设定、大纲或试写任务；已定具体答案不重复问。需要且已选定比较范围时做**同场景两种叙述方案对照试写**，记录选择范围，不把单章声音自动推广全书。
 3. **派准备任务**：资料子 agent 按时点组装依据；总编给本章全局约束，创作子 agent 明确人物诉求、本章变化和详写／概述／跳过的安排。
 4. **派创作任务**：创作子 agent 写入草稿区，提交正文、依据与候选变化，**不改正式事实**。
 5. **派独立评审**：另一位真实子 agent 首读隔离、保存原始反馈后再核对意图；记录输入版本、阅读范围与证据。
@@ -64,7 +63,13 @@
 
 每次写章都走完整闭环。草稿可以保存、讨论，但**缺独立评审或资料未同步的章节不算完成**。
 
+任务状态须随每个产物即时维护：前置未验收不开始后续，产物返回先提交登记，主 agent 核验后才记 `done` 并派下一步。发现“第一章草稿已有、方向或准备仍未完成”时先停创作，保留原稿、核实真实来源和缺项，不能按文件存在自动补勾。
+
+**写一本书，只读取这一本书的作品内容。** 作者指定当前书根后，搜索和派工只限本书；其他由本 Skill 创作的书的正文、设定、大纲、摘要、评审、快照、压缩包和旧 agent 记忆都不能读取或用作样本。不扫描整个作品库，也不把其他书复制进当前目录绕过隔离；全部推荐免问授权不放宽这条边界。若上下文已混入其他书，换隔离上下文再创作。
+
 新阶段默认使用 `workflow_version: 2`：在现有任务中绑定作者约定、总编、章节设计、阅读体验及资料同步的验收证据；最终稿使用版本明确的 v2 评审和可重算的正文检查报告。小改可由独立评审增量复核，主 agent 看 diff 不能代替。旧阶段缺版本视为 v1，保留历史且不补造过去的验收。
+
+新建 v2 阶段还执行作者决策门槛：书名（含弃用名复用）、人物走向、关系、冲突解决、世界规则与结局等决定性内容先给作者选择，再执行。只有实际询问后，作者明确选“全部按推荐且不用询问”，才在该范围免逐项再问；泛泛“你定”、部分回答或连续采用授权不等于此模式。已选具体事项不重复问。主 agent 派工前与执行子 agent 动笔前都要核验任务门槛。字段见[任务管理](novel-studio/references/task-management.md)。
 
 ## 五、安装
 
@@ -143,10 +148,10 @@ cp -r ai-novel-editor-skills/novel-studio ~/.claude/skills/
 
 | 命令 | 用途 |
 | --- | --- |
-| `novelctl.py init` | 建新书（缺失作品库自动创建；校验跨平台书名；不覆盖已有作品） |
+| `novelctl.py init` | 先验证作者书名决定再建书；校验跨平台名称，不覆盖已有作品 |
 | `novelctl.py index` | 刷新索引自动链接块（保留手写说明） |
 | `novelctl.py check` | 检查路径、索引、版本与哈希 |
-| `novelctl.py snapshot / restore` | 整书快照与恢复 |
+| `novelctl.py snapshot / restore` | 整书快照；只从当前书自己的历史目录恢复 |
 | `novelctl.py export` | 按章号合并导出正式章节到作品目录外 |
 | `chapterctl.py adopt` | 按请求采用当前稿（校验评审、授权、版本） |
 | `chapterctl.py finish` | 关闭该次采用的资料同步待办 |
@@ -166,7 +171,7 @@ cp -r ai-novel-editor-skills/novel-studio ~/.claude/skills/
 SKILL=/绝对路径/ai-novel-editor-skills/novel-studio
 BOOK=/绝对路径/作品库/雾港来信
 
-python "$SKILL/scripts/novelctl.py" init --parent /绝对路径/作品库 --title 雾港来信
+python "$SKILL/scripts/novelctl.py" init --parent /绝对路径/作品库 --title 雾港来信 --title-decision /绝对路径/书名决定.json
 python "$SKILL/scripts/novelctl.py" check --book "$BOOK"
 python "$SKILL/scripts/chapterctl.py" check --book "$BOOK"
 python "$SKILL/scripts/taskctl.py" check --book "$BOOK"
@@ -180,7 +185,7 @@ python "$SKILL/scripts/bookctl.py" check --book "$BOOK"
 PowerShell 示例（把路径换成实际值；无需 Bash 变量语法）：
 
 ```powershell
-py -3 "C:/skills/novel-studio/scripts/novelctl.py" init --parent "D:/作品库" --title 雾港来信
+py -3 "C:/skills/novel-studio/scripts/novelctl.py" init --parent "D:/作品库" --title 雾港来信 --title-decision "D:/请求/书名决定.json"
 py -3 "C:/skills/novel-studio/scripts/novelctl.py" check --book "D:/作品库/雾港来信"
 ```
 
@@ -211,7 +216,6 @@ ai-novel-editor-skills/
 ├── README.md
 ├── LICENSE                      MIT
 ├── 使用说明.md                  面向使用者的简明说明
-├── 需求文档.md                  需求基线（v1.4）
 ├── 验证记录.md                  首版实现与验证记录
 ├── novel-studio/                ← Skill 本体，复制这个目录即可安装
 │   ├── SKILL.md

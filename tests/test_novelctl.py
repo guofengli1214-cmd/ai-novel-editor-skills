@@ -4,13 +4,16 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from urllib.parse import unquote
 
-SPEC = importlib.util.spec_from_file_location('novelctl', Path(__file__).resolve().parents[1] / 'novel-studio/scripts/novelctl.py')
+SCRIPTS = Path(__file__).resolve().parents[1] / 'novel-studio/scripts'
+sys.path.insert(0, str(SCRIPTS))
+SPEC = importlib.util.spec_from_file_location('novelctl', SCRIPTS / 'novelctl.py')
 n = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(n)
 
@@ -338,6 +341,123 @@ class NovelctlTests(unittest.TestCase):
                     n.init_book(library, title)
                 self.assertFalse(library.exists())
 
+    def title_decision(self, title, **changes):
+        # Explicitly synthetic author evidence; these tests never draft fiction.
+        decision = dict(resolution='provided', value=title,
+                        source_quote='合成作者原话：本技术夹具书名使用《' + title + '》。',
+                        scope='本次初始化技术测试', prior_status='proposed')
+        decision.update(changes)
+        return decision
+
+    def init_cli(self, library, title, decision=None):
+        command = [sys.executable, str(SCRIPTS / 'novelctl.py'), 'init',
+                   '--parent', str(library), '--title', title]
+        if decision is not None:
+            command.extend(['--title-decision', decision])
+        return subprocess.run(command, capture_output=True, text=True)
+
+    def test_cli_init_requires_title_decision_before_creating_library(self):
+        library = self.parent / '缺决定作品库'
+        result = self.init_cli(library, '仅命令行标题')
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('--title-decision', result.stderr)
+        self.assertFalse(library.exists())
+
+    def test_init_rejects_invalid_title_decision_before_any_directory(self):
+        title = '书名校验技术夹具'
+        library = self.parent / '无效决定作品库'
+        decisions = [
+            {},
+            self.title_decision('不匹配技术标题'),
+            self.title_decision(title, resolution='unresolved'),
+            self.title_decision(title, source_quote=''),
+            self.title_decision(title, prior_status='retired',
+                                history_source='合成旧决定：此名已弃用。'),
+        ]
+        for decision in decisions:
+            with self.subTest(decision=decision):
+                with self.assertRaises(ValueError):
+                    n.init_book(library, title, title_decision=decision)
+                self.assertFalse(library.exists())
+
+    def test_cli_init_preserves_actual_title_source_for_all_json_inputs(self):
+        library = self.parent / '有来源作品库'
+        for form in ('inline', 'file', '@file'):
+            title = '标题来源技术夹具-' + form.replace('@', 'at')
+            decision = self.title_decision(title)
+            raw = json.dumps(decision, ensure_ascii=False)
+            if form != 'inline':
+                path = self.parent / (form.replace('@', 'at') + '-技术决定.json')
+                path.write_text(raw, encoding='utf-8-sig')
+                raw = ('@' if form == '@file' else '') + str(path)
+            result = self.init_cli(library, title, raw)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            book = library / title
+            text = (book / '创作约定/作者约定与授权.md').read_text(encoding='utf-8')
+            recorded = json.loads(text.split('```json\n', 1)[1].split('\n```', 1)[0])
+            self.assertEqual(recorded, {'title': title, 'decision': decision})
+            self.assertIn('不产生正文、设定、剧情或后续创作授权', text)
+            self.assertEqual(n.load_state(book)['title'], title)
+            self.assertIs(n.load_state(book)['task_management'], True)
+            self.assertEqual(n.check_book(book), [])
+
+    def test_old_title_filename_does_not_supply_author_selection(self):
+        title = '旧名技术夹具'
+        library = self.parent / '不能按文件名建书'
+        old_file = self.parent / (title + '.json')
+        # A previous filename and an unresolved record do not prove a new choice.
+        old_file.write_text(json.dumps(self.title_decision(
+            title, resolution='unresolved', prior_status='unknown',
+            source_quote='合成记录：仅找到这个文件名，作者尚未选择。'), ensure_ascii=False),
+            encoding='utf-8')
+        before = old_file.read_bytes()
+        result = self.init_cli(library, title, str(old_file))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('unresolved', result.stderr)
+        self.assertFalse(library.exists())
+        self.assertEqual(old_file.read_bytes(), before)
+
+    def test_retired_title_can_be_reselected_by_explicit_all_recommendations_answer(self):
+        title = '复选旧名技术夹具'
+        question = ('合成提问：旧名《' + title + '》已弃用，是否重新使用该名，'
+                    '并在本次建书全部按推荐走不用询问？')
+        answer = '合成作者答复：本次建书全部按推荐走不用询问。'
+        decision = self.title_decision(
+            title, resolution='delegated', source_quote=answer, prior_status='retired',
+            history_source='合成历史决定：此技术标题已弃用。',
+            opt_out=dict(question_quote=question, answer_quote=answer,
+                         scope='本次初始化技术测试', all_recommendations=True,
+                         no_further_questions=True),
+            reuse_confirmation=dict(question_quote=question, answer_quote=answer,
+                                    acknowledges_retired=True))
+        library = self.parent / '明确复选作品库'
+        result = self.init_cli(library, title, json.dumps(decision, ensure_ascii=False))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        recorded = (library / title / '创作约定/作者约定与授权.md').read_text(encoding='utf-8')
+        self.assertIn('retired', recorded)
+        self.assertIn(question, recorded)
+        self.assertIn(answer, recorded)
+
+    def test_cli_rejects_nonobject_or_incomplete_json_decision_without_creating_library(self):
+        library = self.parent / '非法JSON决定作品库'
+        path = self.parent / '空决定.json'
+        path.write_text('null', encoding='utf-8')
+        for raw in (str(path), '{}', '{invalid'):
+            with self.subTest(raw=raw):
+                result = self.init_cli(library, '无决定技术标题', raw)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertFalse(library.exists())
+
+    def test_valid_title_decision_does_not_overwrite_existing_book(self):
+        before = n.inventory(self.book)
+        self.assertFalse((self.book / '创作约定/作者约定与授权.md').exists())
+        decision = self.title_decision('雾港')
+        with self.assertRaises(FileExistsError):
+            n.init_book(self.parent, '雾港', title_decision=decision)
+        result = self.init_cli(self.parent, '雾港', json.dumps(decision, ensure_ascii=False))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(n.inventory(self.book), before)
+
     def test_init_creates_missing_library_and_removes_only_failed_new_book(self):
         library = self.parent / '新建/作品库'
         book = n.init_book(library, '中文书名', task_management=False)
@@ -428,7 +548,7 @@ class NovelctlTests(unittest.TestCase):
 
     def test_restore_rejects_non_snapshot_and_unsupported_schema_without_changes(self):
         before = n.inventory(self.book)
-        with self.assertRaisesRegex(ValueError, 'not a snapshot directory: missing manifest.json'):
+        with self.assertRaisesRegex(ValueError, 'direct child of current book history'):
             n.restore_book(self.book, self.book / '摘要')
         self.assertEqual(n.inventory(self.book), before)
         snap = n.snapshot_book(self.book, '版本测试')

@@ -4,16 +4,27 @@
 The authoritative JSON and its derived Markdown checkboxes live together in
 创作约定/任务计划与验收.md. Notes outside the managed markers are preserved.
 init creates S01/planning; plan accepts {id,title,workflow,chapter?,next_stage?,
-end_reason?}. update accepts {stage,task,status,inputs?,outputs?,verification?,
+end_reason?,direction_gate_version?}. update accepts {stage,task,status,inputs?,outputs?,verification?,
 reason?,operation_id?,checks?}; submit uses the same request without status and
 registers actual outputs as submitted, never accepted. New stages default to
 workflow_version 2; a missing version means historical version 1.
+New v2 planning stages also use direction_gate_version 1: direction checks
+record resolved author decisions before submission or acceptance. This checks
+declared fields and evidence, not whether quoted words prove real authorization.
+New v2 stages use decision_gate_version 1 for decisive choices: author-supplied
+choices or actual questions/answers; delegated choices require the explicit
+all-recommendations/no-further-questions exception. Old stages are not upgraded.
+New stages also use execution_gate_version 1; an existing current unclosed stage
+may explicitly enable it with plan. Execution stops for unregistered or unordered
+artifacts. recover records current provenance/disposition in this same ledger;
+it changes neither artifacts nor task status. update recovery_only:true permits
+only verified administrative repair of existing evidence, never starting work.
 Evidence is [{path,sha256}], verification is {agent_id,source}; identities and
 acceptance are host assertions, not authentication. Core tasks cannot be skipped.
 next_plan needs verification and an existing detailed next stage or end_reason,
 without hashing this ledger. Other completed tasks need current output evidence.
 
-Commands: init, plan, update, submit, render, check [--stage ID], gate --stage ID
+Commands: init, plan, update, submit, recover, render, check [--stage ID], gate --stage ID
 --before KIND, close --stage ID. All take --book DIR. plan/update --request
 accept inline JSON, @file or a JSON-file path. render refreshes checkboxes after
 intentional JSON edits (including optional research tasks). It does not grant
@@ -22,6 +33,9 @@ executing its successor. Plan only the current and next stage, not a whole book.
 Writes use the chapter writer lock and atomic replacement, and never index.
 Checks/gates are read-only with before/after inventory checks. No model calls,
 literary scoring or second task-state file. Host agents must verify real work.
+gate --neutral returns only mechanical IDs and gate_not_ready on any validation
+failure. Use it for independent first readers; ordinary gate/check diagnostics
+may contain private source paths and belong to the orchestrator.
 """
 import argparse
 import copy
@@ -44,7 +58,7 @@ WORKFLOWS = {
 STATUSES = {'todo', 'doing', 'submitted', 'done', 'blocked', 'not_applicable'}
 FINISHED = {'done', 'not_applicable'}
 TASK_DEFAULTS = {
-    'direction': ('创作方向与授权', 'materials', '记录作者目标、边界和本次授权。'),
+    'direction': ('创作方向与授权', 'materials', '依据真实答复或明确委托记录偏好、资料模式和本轮授权；关键未决项先问并等待。'),
     'concept': ('构思验证', 'writer', '以梗概或代表场景检验持续冲突与主要风险。'),
     'next_plan': ('细化下一阶段或记录结束', 'materials', '下一阶段已有具体任务，或明确本次授权结束。'),
     'prepare': ('写前资料与场景准备', 'materials', '核对相关原文、故事时点与本次场景任务。'),
@@ -76,6 +90,14 @@ EDITORIAL_CHECKS = {
     'structural_revision': ('issue_disposition',),
     'whole_recheck': ('current_version', 'issue_disposition'),
 }
+DIRECTION_DECISIONS = {
+    'author_preferences': ('experience', 'style', 'length'),
+    'authorization': ('collaboration', 'work_scope'),
+}
+DECISION_RESOLUTIONS = {'provided', 'selected', 'delegated', 'unresolved'}
+CREATIVE_DECISION_TASKS = {'concept', 'prepare', 'revise', 'next_plan', 'structural_revision'}
+TITLE_PRIOR_STATUSES = {'proposed', 'active', 'retired', 'rejected', 'unknown'}
+RECOVERY_CLASSES = {'author_input', 'held_output', 'excluded'}
 
 
 def require(condition, message):
@@ -160,13 +182,146 @@ def check_structure(root, task):
         evidence_structure(root, [item])
 
 
+def decision_errors(decision, topic, strict=False, expected_title=None):
+    if not isinstance(decision, dict):
+        return ['missing author decision: ' + topic]
+    resolution = decision.get('resolution')
+    if not isinstance(resolution, str) or resolution not in DECISION_RESOLUTIONS:
+        return ['invalid author decision resolution: ' + topic]
+    if resolution == 'unresolved':
+        return ['author decision unresolved: ' + topic]
+    errors = []
+    if not all(nonempty(decision.get(key)) for key in ('value', 'source_quote', 'scope')):
+        errors.append('resolved author decision needs value/source_quote/scope: ' + topic)
+    if not strict:
+        return errors
+    if resolution == 'selected' and not nonempty(decision.get('question_quote')):
+        errors.append('selected decision requires actual question_quote: ' + topic)
+    if resolution == 'delegated':
+        opt_out = decision.get('opt_out')
+        if (not isinstance(opt_out, dict)
+                or not all(nonempty(opt_out.get(key)) for key in ('question_quote', 'answer_quote', 'scope'))
+                or opt_out.get('all_recommendations') is not True
+                or opt_out.get('no_further_questions') is not True):
+            errors.append('delegated decision requires explicit all-recommendations/no-further-questions answer: ' + topic)
+    if expected_title is not None:
+        title = decision.get('value')
+        if title != expected_title:
+            errors.append('selected title differs from current book state: ' + topic)
+        prior = decision.get('prior_status')
+        if not isinstance(prior, str) or prior not in TITLE_PRIOR_STATUSES:
+            errors.append('title requires valid prior_status: ' + topic)
+        if prior in ('retired', 'rejected'):
+            if not nonempty(decision.get('history_source')):
+                errors.append('retired/rejected title requires history_source: ' + topic)
+            reuse = decision.get('reuse_confirmation')
+            if (not isinstance(reuse, dict) or reuse.get('acknowledges_retired') is not True
+                    or not nonempty(reuse.get('answer_quote')) or not nonempty(title)):
+                errors.append('retired/rejected title requires explicit named reuse confirmation: ' + topic)
+            elif resolution == 'provided':
+                if not nonempty(decision.get('source_quote')) or title not in decision['source_quote']:
+                    errors.append('proactively restored title source must explicitly name the title: ' + topic)
+                if title not in reuse['answer_quote']:
+                    errors.append('title reuse answer must explicitly name the title: ' + topic)
+            elif not nonempty(reuse.get('question_quote')) or title not in reuse['question_quote']:
+                errors.append('retired/rejected title requires explicit named reuse confirmation: ' + topic)
+            elif resolution == 'delegated':
+                opt_out = decision.get('opt_out')
+                if not isinstance(opt_out, dict) or reuse['answer_quote'] != opt_out.get('answer_quote'):
+                    errors.append('title reuse answer must match the actual opt-out answer: ' + topic)
+                if (not isinstance(opt_out, dict) or not nonempty(opt_out.get('question_quote'))
+                        or title not in opt_out['question_quote']):
+                    errors.append('title reuse opt-out question must explicitly name the title: ' + topic)
+            elif title not in reuse['answer_quote']:
+                if (resolution != 'selected' or reuse.get('selected_title') != title
+                        or decision.get('source_quote') != reuse['answer_quote']):
+                    errors.append('title reuse answer must name the title or preserve an explicit selected option mapping: ' + topic)
+    return errors
+
+
+def title_decision_errors(title, decision):
+    """Pure pre-init/title-change gate; quotes are assertions, not authentication."""
+    errors = decision_errors(decision, 'title', strict=True, expected_title=title)
+    if not nonempty(title):
+        errors.append('title must be a nonempty string')
+    return errors
+
+
+def direction_errors(stage, task, root=None):
+    """Verify declared readiness, never interpret author prose or invent consent."""
+    if stage.get('direction_gate_version') != 1 or task['kind'] != 'direction':
+        return []
+    checks, errors = task.get('checks', {}), []
+    decisions = []
+    for category, topics in DIRECTION_DECISIONS.items():
+        group = checks.get(category, {}).get('decisions', {})
+        for topic in topics:
+            decisions.append((category + '.' + topic, group.get(topic) if isinstance(group, dict) else None))
+    decisions.append(('startup_mode', checks.get('startup_mode', {}).get('decision')))
+    strict = stage.get('decision_gate_version') == 1
+    if strict:
+        preferences = checks.get('author_preferences', {}).get('decisions', {})
+        decisions.append(('author_preferences.title', preferences.get('title') if isinstance(preferences, dict) else None))
+    for topic, decision in decisions:
+        if topic == 'author_preferences.title' and root is not None:
+            errors.extend(title_decision_errors(nc.load_state(root)['title'], decision))
+        else:
+            errors.extend(decision_errors(decision, topic, strict=strict))
+    return errors
+
+
+def creative_decision_errors(root, stage, task):
+    if stage.get('decision_gate_version') != 1 or task['kind'] not in CREATIVE_DECISION_TASKS:
+        return []
+    check = task.get('checks', {}).get('creative_decisions')
+    if not isinstance(check, dict):
+        return ['missing editorial check: creative_decisions']
+    items = check.get('items')
+    if not isinstance(items, list):
+        return ['creative_decisions requires an items list']
+    if not items:
+        return [] if nonempty(check.get('none_reason')) else ['no new decisions requires none_reason']
+    seen, errors = set(), []
+    for item in items:
+        if not isinstance(item, dict) or not all(nonempty(item.get(key)) for key in ('id', 'topic', 'record_id')):
+            errors.append('creative decision requires id/topic/record_id')
+            continue
+        if item['id'] in seen:
+            errors.append('duplicate creative decision id: ' + item['id'])
+        seen.add(item['id'])
+        expected_title = nc.load_state(root)['title'] if item['topic'] == 'title' else None
+        errors.extend(decision_errors(item, item['topic'], strict=True, expected_title=expected_title))
+    return errors
+
+
+def decision_preflight_errors(root, stage, task):
+    errors = creative_decision_errors(root, stage, task)
+    if stage.get('decision_gate_version') != 1 or task['kind'] not in CREATIVE_DECISION_TASKS:
+        return errors
+    check = task.get('checks', {}).get('creative_decisions')
+    if not isinstance(check, dict):
+        return errors
+    evidence = {item['path']: item['sha256'] for item in task['inputs'] + task['outputs']}
+    if evidence.get(check.get('path')) != check.get('sha256'):
+        errors.append('creative decision preflight must reference registered task evidence')
+    else:
+        path = nc.relative_path(root, check['path'])
+        if not path.is_file() or nc.digest(path) != check['sha256']:
+            errors.append('stale creative decision preflight evidence')
+    return errors
+
+
 def editorial_errors(root, stage, task):
-    if workflow_version(stage) < 2 or task['status'] == 'not_applicable':
+    strict_direction = stage.get('direction_gate_version') == 1 and task['kind'] == 'direction'
+    if (workflow_version(stage) < 2 and not strict_direction) or task['status'] == 'not_applicable':
         return []
     checks = task.get('checks', {})
-    errors = []
+    errors = direction_errors(stage, task, root) + creative_decision_errors(root, stage, task)
     references = {item['path']: item['sha256'] for item in task['inputs'] + task['outputs']}
-    for name in EDITORIAL_CHECKS.get(task['kind'], ()):
+    required = list(EDITORIAL_CHECKS.get(task['kind'], ()))
+    if stage.get('decision_gate_version') == 1 and task['kind'] in CREATIVE_DECISION_TASKS:
+        required.append('creative_decisions')
+    for name in required:
         item = checks.get(name)
         if not item:
             errors.append('missing editorial check: ' + name)
@@ -186,6 +341,17 @@ def structure(root, data):
         stage_map[stage['id']] = stage
         require(stage.get('workflow') in WORKFLOWS, 'unknown workflow')
         workflow_version(stage)
+        if 'direction_gate_version' in stage:
+            require(stage['workflow'] == 'planning' and type(stage['direction_gate_version']) is int
+                    and stage['direction_gate_version'] == 1, 'invalid direction_gate_version (planning only, version 1)')
+        if 'decision_gate_version' in stage:
+            require(workflow_version(stage) == 2 and type(stage['decision_gate_version']) is int
+                    and stage['decision_gate_version'] == 1, 'invalid decision_gate_version (workflow v2 only, version 1)')
+            require(stage['workflow'] != 'planning' or stage.get('direction_gate_version') == 1,
+                    'decision gate planning requires the author direction gate')
+        if 'execution_gate_version' in stage:
+            require(type(stage['execution_gate_version']) is int and stage['execution_gate_version'] == 1,
+                    'invalid execution_gate_version (version 1)')
         require(stage.get('status') in ('planned', 'active', 'done'), 'invalid stage status')
         chapter = stage.get('chapter')
         require(chapter is None or type(chapter) is int and chapter > 0, 'invalid stage chapter')
@@ -218,6 +384,18 @@ def structure(root, data):
         for previous, current in zip(positions, positions[1:]):
             require(tasks[previous]['id'] in tasks[current]['depends_on'], 'core task missing required predecessor: ' + tasks[current]['kind'])
     require(data.get('current_stage') in stage_map, 'invalid current_stage')
+    if any(stage.get('execution_gate_version') == 1 for stage in stages):
+        current_position = next(i for i, stage in enumerate(stages) if stage['id'] == data['current_stage'])
+        require(all(stage['status'] == 'done' for stage in stages[:current_position]),
+                'earlier stages must close before advancing the stage cursor')
+        require(all(stage['status'] != 'active' for stage in stages[current_position + 1:]),
+                'future stages cannot be active')
+        require(all(all(task['status'] in FINISHED for task in stage['tasks'])
+                    for stage in stages if stage['status'] == 'done'),
+                'closed stages cannot contain unaccepted tasks')
+        current = stage_map[data['current_stage']]
+        expected_cursor = next((task['id'] for task in current['tasks'] if task['status'] not in FINISHED), '')
+        require(data.get('current_task') == expected_cursor, 'task cursor must match the first unaccepted task')
     require(sum(stage['status'] != 'done' for stage in stages) <= 2, 'detail only the current and next stage')
     require(data.get('current_task') == '' or data.get('current_task') in task_map and task_map[data['current_task']][0]['id'] == data['current_stage'], 'invalid current_task')
     for stage in stages:
@@ -244,6 +422,20 @@ def structure(root, data):
         visited.add(task_id)
     for task_id in task_map:
         visit(task_id)
+    recoveries = data.get('artifact_recoveries', [])
+    require(isinstance(recoveries, list), 'artifact_recoveries must be a list')
+    for record in recoveries:
+        require(isinstance(record, dict) and record.get('classification') in RECOVERY_CLASSES,
+                'invalid artifact recovery classification')
+        evidence_structure(root, [record])
+        evidence_structure(root, [record.get('source')])
+        require(record['source']['path'] != record['path'], 'artifact recovery needs a separate provenance source')
+        require(nonempty(record.get('source_quote')) and nonempty(record.get('scope')), 'artifact recovery needs source_quote/scope')
+        verification = record.get('verification')
+        require(isinstance(verification, dict) and all(nonempty(verification.get(key)) for key in ('agent_id', 'source')),
+                'artifact recovery needs host verification')
+        if record['classification'] == 'held_output':
+            require(record.get('task_id') in task_map, 'held_output needs an existing task_id')
     return stage_map, task_map
 
 
@@ -282,8 +474,14 @@ def new_stage(stage_id, title, workflow, chapter=None, next_stage=None, end_reas
                           status='todo', depends_on=[tasks[-1]['id']] if tasks else [],
                           inputs=[], outputs=[], checks={}, acceptance=acceptance,
                           verification=None, reason='', history=[], operation_id=''))
-    return dict(id=stage_id, title=title, workflow=workflow, workflow_version=workflow_version, chapter=chapter,
-                status='planned', next_stage=next_stage, end_reason=end_reason, tasks=tasks)
+    stage = dict(id=stage_id, title=title, workflow=workflow, workflow_version=workflow_version, chapter=chapter,
+                 status='planned', next_stage=next_stage, end_reason=end_reason, tasks=tasks)
+    if workflow == 'planning' and workflow_version == 2:
+        stage['direction_gate_version'] = 1
+    if workflow_version == 2:
+        stage['decision_gate_version'] = 1
+        stage['execution_gate_version'] = 1
+    return stage
 
 
 def initialize(book, workflow_version=2):
@@ -309,6 +507,16 @@ def plan(book, request):
                 require(field not in request or request[field] == stage[field], 'cannot change existing ' + field)
             require('workflow_version' not in request or request['workflow_version'] == workflow_version(stage),
                     'cannot rewrite historical workflow_version; plan a new stage')
+            if 'decision_gate_version' in request:
+                require(type(request['decision_gate_version']) is int and request['decision_gate_version'] == 1
+                        and stage.get('decision_gate_version') == 1,
+                        'decision gate cannot be downgraded or added to historical stages; plan a new stage')
+            if 'execution_gate_version' in request:
+                require(type(request['execution_gate_version']) is int and request['execution_gate_version'] == 1,
+                        'execution gate cannot be disabled')
+                require(stage_id == data['current_stage'] or stage.get('execution_gate_version') == 1,
+                        'upgrade only the current unclosed stage execution gate')
+                stage['execution_gate_version'] = 1
             if any(field in request and request[field] != stage[field] for field in ('next_stage', 'end_reason')):
                 next_plan = selected_task(stage, 'next_plan')
                 if next_plan['status'] in FINISHED:
@@ -328,9 +536,27 @@ def plan(book, request):
                 require(all(workflow_version(item) == 1 for item in data['stages']),
                         'workflow v2 books cannot create legacy stages to bypass editorial gates')
             stage = new_stage(stage_id, request.get('title'), request.get('workflow'), request.get('chapter'), request.get('next_stage'), request.get('end_reason', ''), request.get('workflow_version', 2))
+            if 'decision_gate_version' in request:
+                require(type(request['decision_gate_version']) is int and request['decision_gate_version'] == 1
+                        and stage.get('decision_gate_version') == 1, 'new decision gate cannot be disabled')
+            if 'execution_gate_version' in request:
+                require(type(request['execution_gate_version']) is int and request['execution_gate_version'] == 1,
+                        'execution gate cannot be disabled')
+                stage['execution_gate_version'] = 1
             if 'compatibility_reason' in request:
                 stage['compatibility_reason'] = request['compatibility_reason']
             data['stages'].append(stage)
+        if 'direction_gate_version' in request:
+            require(stage['workflow'] == 'planning' and type(request['direction_gate_version']) is int
+                    and request['direction_gate_version'] == 1, 'direction gate cannot be downgraded or used outside planning')
+            if stage.get('direction_gate_version') != 1:
+                direction = selected_task(stage, 'direction')
+                require(direction['status'] not in FINISHED,
+                        'accepted direction is historical; use a new planning stage for author decisions')
+                archive(direction, 'direction gate upgraded before acceptance')
+                stage['direction_gate_version'] = 1
+                if stage_id == data['current_stage']:
+                    data['current_task'] = direction['id']
         if stage['next_stage']:
             successor = next((item for item in data['stages'] if item['id'] == stage['next_stage']), None)
             require(successor is not None and successor['status'] != 'done', 'next_stage must be an unfinished future stage')
@@ -396,6 +622,37 @@ def update(book, request):
         task = selected_task(stage, request.get('task'))
         status = request.get('status')
         require(status in STATUSES, 'invalid task status')
+        enforced = stage.get('execution_gate_version') == 1
+        recovery_only = request.get('recovery_only', False)
+        require(type(recovery_only) is bool, 'recovery_only must be a boolean')
+        require(not recovery_only or enforced, 'recovery_only requires an explicit execution gate upgrade')
+        before_status = task['status']
+        before_outputs = {(item['path'], item['sha256']) for item in task['outputs']}
+        requested_outputs = request.get('outputs', task['outputs'])
+        if enforced:
+            evidence_structure(root, requested_outputs)
+            new_outputs = {(item['path'], item['sha256']) for item in requested_outputs} - before_outputs
+            require(not new_outputs or status not in ('todo', 'blocked', 'doing'),
+                    'new output evidence requires ordered submission; todo/blocked/doing cannot preregister outputs')
+            if status == 'doing' and before_status != 'doing':
+                candidates = set(artifact_candidates(root))
+                known = known_artifact_pairs(root, data)
+                require(not (before_outputs & candidates) - known,
+                        'preexisting output needs provenance recovery before starting the task')
+            if recovery_only:
+                require(status != 'doing', 'recovery_only never authorizes creative execution')
+                verification = request.get('verification')
+                require(nonempty(request.get('reason')) and isinstance(verification, dict)
+                        and all(nonempty(verification.get(key)) for key in ('agent_id', 'source')),
+                        'recovery_only needs reason and fresh host verification')
+                known = known_artifact_pairs(root, data)
+                require(all((item['path'], item['sha256']) in known for item in requested_outputs),
+                        'recovery_only outputs need existing registered provenance; use recover first')
+            elif status in ('submitted', 'done', 'not_applicable') and before_status != 'doing':
+                candidates = set(artifact_candidates(root))
+                known = known_artifact_pairs(root, data)
+                require(not ({(item['path'], item['sha256']) for item in requested_outputs} & candidates) - known,
+                        'existing output needs provenance recovery or a task started before production')
         if task['kind'] == 'sync' and status == 'done':
             require(not nc.load_state(root)['pending_operations'], 'pending_operations must be cleared before accepting sync')
         if status in ('doing', 'submitted', 'done', 'not_applicable'):
@@ -429,7 +686,18 @@ def update(book, request):
                             archive(downstream, 'reopened dependency')
                             downstream['status'] = 'todo'
                             downstream['verification'] = None
+        data['current_task'] = next((item['id'] for item in stage['tasks'] if item['status'] not in FINISHED), '')
         structure(root, data)
+        if enforced and status in ('doing', 'submitted', 'done', 'not_applicable'):
+            if status == 'doing':
+                errors = decision_preflight_errors(root, stage, task)
+                require(not errors, '; '.join(errors))
+                for item in task['inputs'] + task['outputs']:
+                    path = nc.relative_path(root, item['path'])
+                    require(path.is_file() and nc.digest(path) == item['sha256'],
+                            'stale execution evidence: ' + item['path'])
+            blockers = artifact_blockers(root, data, task_map)
+            require(recovery_only or not blockers, '; '.join(blockers))
         if status == 'submitted':
             require(bool(task['outputs']), 'submitted task needs output evidence')
             for item in task['inputs'] + task['outputs']:
@@ -442,7 +710,10 @@ def update(book, request):
         stage['status'] = 'active'
         data['current_task'] = next((item['id'] for item in stage['tasks'] if item['status'] not in FINISHED), '')
         save(root, data)
-        return dict(ok=True, stage=stage['id'], task=task['id'], status=status)
+        result = dict(ok=True, stage=stage['id'], task=task['id'], status=status)
+        if recovery_only:
+            result['recovery_only'] = True
+        return result
 
 
 def submit(book, request):
@@ -451,24 +722,157 @@ def submit(book, request):
     return update(book, dict(request, status='submitted'))
 
 
+def artifact_candidates(root):
+    """Conservative filename inventory; provenance comes from explicit records."""
+    result = []
+    for folder in ('草稿与备选', '审稿与修订', '大纲'):
+        directory = root / folder
+        if not directory.exists():
+            continue
+        for path in sorted(directory.rglob('*')):
+            substantive = (path.name != '索引.md'
+                           and path.suffix.lower() in ('.md', '.txt', '.json'))
+            if path.is_file() and (substantive or re.search(r'第\d+章.*(?:草稿|首读|评审|复核|修订)', path.name)):
+                result.append((path.relative_to(root).as_posix(), nc.digest(path)))
+    return result
+
+
+def recovery_source_errors(root, record):
+    source = record['source']
+    path = nc.relative_path(root, source['path'])
+    if not path.is_file() or nc.digest(path) != source['sha256']:
+        return ['stale recovery provenance: ' + source['path']]
+    if record['source_quote'] not in path.read_text(encoding='utf-8-sig'):
+        return ['recovery source_quote is absent from provenance: ' + source['path']]
+    return []
+
+
+def recovery_index(data):
+    return {record['path']: record for record in data.get('artifact_recoveries', [])}
+
+
+def artifact_owner_matches(path, stage, task):
+    chapter = re.search(r'第(\d+|[零〇一二三四五六七八九十百千两]+)章', Path(path).name)
+    if path.startswith('草稿与备选/') and chapter:
+        if task['kind'] == 'structural_revision' and stage['workflow'] == 'finalization':
+            return True
+        return (stage['workflow'] in ('chapter', 'trial')
+                and task['kind'] in ('voice_trial', 'draft', 'revise')
+                and (not chapter.group(1).isdigit() or int(chapter.group(1)) == stage['chapter']))
+    return True
+
+
+def artifact_blockers(root, data, task_map=None):
+    """Find current unaccounted output; inputs alone never establish provenance."""
+    if task_map is None:
+        _, task_map = structure(root, data)
+    valid = task_validity(root, data, task_map)
+    recoveries = recovery_index(data)
+    current, historical = {}, set()
+    for stage in data['stages']:
+        for task in stage['tasks']:
+            for item in task['outputs']:
+                current.setdefault((item['path'], item['sha256']), []).append((stage, task))
+            for record in task['history']:
+                if isinstance(record, dict) and record.get('status') in FINISHED and isinstance(record.get('verification'), dict):
+                    historical.update((item['path'], item['sha256']) for item in record.get('outputs', []))
+    blockers = []
+    for path, sha in artifact_candidates(root):
+        pair = path, sha
+        record = recoveries.get(path)
+        if record and record['sha256'] == sha:
+            source_errors = recovery_source_errors(root, record)
+            if source_errors:
+                blockers.extend(source_errors)
+                continue
+            if record['classification'] == 'excluded':
+                if any(pair in {(item['path'], item['sha256']) for item in task['inputs'] + task['outputs']}
+                       for stage, task in task_map.values() if stage['status'] != 'done'):
+                    blockers.append('excluded artifact cannot be active task evidence: ' + path)
+                continue
+        owners = current.get(pair, [])
+        ready = [(stage, task) for stage, task in owners
+                 if task['status'] in ('doing', 'submitted', 'done', 'not_applicable')
+                 and artifact_owner_matches(path, stage, task)
+                 and (stage['id'] == data['current_stage'] or stage['status'] == 'done')
+                 and all(not valid(dep) for dep in task['depends_on'])]
+        if record and record['sha256'] == sha and record['classification'] == 'held_output':
+            if not any(task['id'] == record['task_id'] and task['status'] in FINISHED | {'submitted'} for _, task in ready):
+                blockers.append('held output needs ordered recovery submission/acceptance: ' + path)
+            continue
+        if owners and not ready:
+            blockers.append('out-of-order output is not accepted task progress: ' + path)
+        elif ready or pair in historical:
+            continue
+        elif record and record['sha256'] == sha and record['classification'] == 'author_input':
+            continue
+        else:
+            blockers.append('unregistered artifact requires provenance recovery: ' + path)
+    return blockers
+
+
+def known_artifact_pairs(root, data):
+    pairs = set()
+    candidates = set(artifact_candidates(root))
+    for stage in data['stages']:
+        for task in stage['tasks']:
+            pairs.update((item['path'], item['sha256']) for item in task['inputs']
+                         if (item['path'], item['sha256']) not in candidates)
+            if task['status'] in ('doing', 'submitted', 'done', 'not_applicable'):
+                pairs.update((item['path'], item['sha256']) for item in task['outputs'])
+            for record in task['history']:
+                if isinstance(record, dict) and record.get('status') in FINISHED and isinstance(record.get('verification'), dict):
+                    pairs.update((item['path'], item['sha256']) for item in record.get('outputs', []))
+    for record in recovery_index(data).values():
+        if record['classification'] != 'excluded' and not recovery_source_errors(root, record):
+            pairs.add((record['path'], record['sha256']))
+    return pairs
+
+
+def recover(book, request):
+    """Record an existing artifact's provenance/disposition, never approve work."""
+    require(isinstance(request, dict), 'recovery request must be an object')
+    artifacts = request.get('artifacts')
+    require(isinstance(artifacts, list) and bool(artifacts), 'recovery needs artifacts')
+    verification = request.get('verification')
+    require(isinstance(verification, dict) and all(nonempty(verification.get(key)) for key in ('agent_id', 'source')),
+            'recovery needs host verification')
+    with writing(book) as root:
+        data, _ = load(root)
+        seen = set()
+        records = []
+        for item in artifacts:
+            require(isinstance(item, dict) and item.get('path') not in seen, 'invalid/duplicate recovery artifact')
+            seen.add(item.get('path'))
+            record = dict(copy.deepcopy(item), verification=copy.deepcopy(verification))
+            records.append(record)
+        data.setdefault('artifact_recoveries', []).extend(records)
+        structure(root, data)
+        for record in records:
+            path = nc.relative_path(root, record['path'])
+            require(path.is_file() and nc.digest(path) == record['sha256'], 'recovery artifact is missing or changed: ' + record['path'])
+            errors = recovery_source_errors(root, record)
+            require(not errors, '; '.join(errors))
+        save(root, data)
+        return dict(ok=True, recovered=[record['path'] for record in records],
+                    note='Provenance recorded only; task status and creative authorization are unchanged.')
+
+
 def artifact_warnings(root, data):
-    """Heuristics locate unregistered files; existence never proves completion."""
+    """Historical advisory inventory; existence never proves completion."""
     registered = set()
     for stage in data['stages']:
         for task in stage['tasks']:
             for record in [task] + task.get('history', []):
                 for item in record.get('inputs', []) + record.get('outputs', []):
                     registered.add((item['path'], item['sha256']))
+    for record in recovery_index(data).values():
+        if not recovery_source_errors(root, record):
+            registered.add((record['path'], record['sha256']))
     warnings = []
-    for folder in ('草稿与备选', '审稿与修订'):
-        directory = root / folder
-        if not directory.exists():
-            continue
-        for path in sorted(directory.rglob('*')):
-            if path.is_file() and re.search(r'第\d+章.*(?:草稿|首读|评审|复核|修订)', path.name):
-                relative = path.relative_to(root).as_posix()
-                if (relative, nc.digest(path)) not in registered:
-                    warnings.append('unregistered artifact (inspect before resuming): ' + relative)
+    for relative, sha in artifact_candidates(root):
+        if (relative, sha) not in registered:
+            warnings.append('unregistered artifact (inspect before resuming): ' + relative)
     return warnings
 
 
@@ -495,6 +899,15 @@ def check(book, stage=None):
             valid = task_validity(root, data, task_map)
             for task in selected['tasks']:
                 errors = valid(task['id']) if task['status'] in FINISHED else [dep + ': invalid dependency' for dep in task['depends_on'] if valid(dep)] if task['status'] in ('doing', 'submitted') else []
+                if selected.get('execution_gate_version') == 1:
+                    if task['status'] == 'doing':
+                        errors.extend(decision_preflight_errors(root, selected, task))
+                        for item in task['inputs'] + task['outputs']:
+                            path = nc.relative_path(root, item['path'])
+                            if not path.is_file() or nc.digest(path) != item['sha256']:
+                                errors.append('stale execution evidence: ' + item['path'])
+                    if task['status'] in ('todo', 'blocked') and task['outputs'] and not task['history']:
+                        errors.append('unstarted task cannot claim output evidence')
                 if task['status'] == 'submitted':
                     errors.extend(editorial_errors(root, selected, task))
                     if not task['outputs']:
@@ -512,8 +925,11 @@ def check(book, stage=None):
             expected_cursor = next((task['id'] for task in current['tasks'] if task['status'] not in FINISHED), '')
             if data['current_task'] != expected_cursor:
                 issues.append('task cursor differs from actual accepted/submitted tasks')
+            blockers = artifact_blockers(root, data, task_map) if current.get('execution_gate_version') == 1 else []
+            issues.extend(blockers)
             result = dict(ok=not issues, enabled=True, stage=selected['id'], issues=issues, stale_tasks=stale,
                           warnings=artifact_warnings(root, data),
+                          artifact_blockers=blockers,
                           resume=dict(stage=data['current_stage'], task=data['current_task'],
                                       note='Use this ledger cursor; inspect unregistered artifacts before repeating work.'))
         return result
@@ -521,7 +937,7 @@ def check(book, stage=None):
         return dict(ok=False, enabled=True, issues=[str(exc)], stale_tasks=stale)
 
 
-def gate(book, stage, before):
+def _gate_details(book, stage, before):
     with reading(book) as root:
         data, (stages, task_map) = load(root)
         selected = stages.get(stage)
@@ -532,7 +948,28 @@ def gate(book, stage, before):
         for dependency in task['depends_on']:
             errors = valid(dependency)
             require(not errors, dependency + ': ' + '; '.join(errors))
+        if selected.get('execution_gate_version') == 1:
+            blockers = artifact_blockers(root, data, task_map)
+            require(not blockers, '; '.join(blockers))
+        decision_errors = decision_preflight_errors(root, selected, task)
+        require(not decision_errors, '; '.join(decision_errors))
         return dict(ok=True, stage=stage, before=task['kind'])
+
+
+def gate(book, stage, before, neutral=False):
+    if not neutral:
+        return _gate_details(book, stage, before)
+    # Echo only caller-provided mechanical identifiers. Hidden filenames,
+    # titles, author choices and even inventory/load errors stay with the host.
+    result = {}
+    for key, value in (('stage', stage), ('before', before)):
+        if isinstance(value, str) and re.fullmatch(r'[A-Za-z][A-Za-z0-9_.-]{0,79}', value):
+            result[key] = value
+    try:
+        _gate_details(book, stage, before)
+    except Exception:
+        return dict(result, ok=False, error='gate_not_ready')
+    return dict(result, ok=True)
 
 
 def close_stage(book, stage):
@@ -627,25 +1064,26 @@ def require_finalization(book, record):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     subs = parser.add_subparsers(dest='command', required=True)
-    for command in ('init', 'plan', 'update', 'submit', 'render', 'check', 'gate', 'close'):
+    for command in ('init', 'plan', 'update', 'submit', 'recover', 'render', 'check', 'gate', 'close'):
         sub = subs.add_parser(command)
         sub.add_argument('--book', required=True)
-        if command in ('plan', 'update', 'submit'):
+        if command in ('plan', 'update', 'submit', 'recover'):
             sub.add_argument('--request', required=True)
         if command in ('check', 'gate', 'close'):
             sub.add_argument('--stage', required=command != 'check')
         if command == 'gate':
             sub.add_argument('--before', required=True)
+            sub.add_argument('--neutral', action='store_true', help='hide private validation details from independent readers')
     args = parser.parse_args(argv)
     try:
-        if args.command in ('plan', 'update', 'submit'):
+        if args.command in ('plan', 'update', 'submit', 'recover'):
             raw = args.request
             request = json.loads(raw) if raw.lstrip().startswith('{') else json.loads(Path(raw[1:] if raw.startswith('@') else raw).read_text(encoding='utf-8'))
             result = globals()[args.command](args.book, request)
         elif args.command == 'check':
             result = check(args.book, args.stage)
         elif args.command == 'gate':
-            result = gate(args.book, args.stage, args.before)
+            result = gate(args.book, args.stage, args.before, neutral=args.neutral)
         elif args.command == 'close':
             result = close_stage(args.book, args.stage)
         else:

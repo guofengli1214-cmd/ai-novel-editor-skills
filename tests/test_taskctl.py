@@ -37,6 +37,12 @@ class TaskTests(unittest.TestCase):
     def data(self):
         return tc.load_plan(self.root)
 
+    def start_v2_prepare(self, stage='S02'):
+        evidence = self.evidence()
+        tc.update(self.root, dict(stage=stage, task='prepare', status='doing', inputs=[evidence],
+                                 checks=dict(creative_decisions=dict(evidence, summary='合成已选技术决定',
+                                                                     items=[], none_reason='只验证既有技术选择'))))
+
     def raw_data(self, data, render=True):
         if render:
             self.write(tc.TASK_FILE, '# 测试\n' + tc.managed(data) + '\n')
@@ -209,7 +215,7 @@ class TaskTests(unittest.TestCase):
         tc.plan(self.root, dict(id='S02', title='新授权首章', workflow='chapter', chapter=1))
         self.assertEqual(self.data()['current_stage'], 'S02')
         self.assertEqual(self.data()['stages'][1]['status'], 'planned')
-        tc.update(self.root, dict(stage='S02', task='prepare', status='doing'))
+        self.start_v2_prepare()
 
     def test_new_authorization_can_select_an_existing_planned_stage_after_end(self):
         tc.plan(self.root, dict(id='S02', title='预备首章', workflow='chapter', chapter=1))
@@ -220,7 +226,7 @@ class TaskTests(unittest.TestCase):
         tc.close_stage(self.root, 'S01')
         tc.plan(self.root, dict(id='S02', title='新授权开始首章'))
         self.assertEqual(self.data()['current_stage'], 'S02')
-        tc.update(self.root, dict(stage='S02', task='prepare', status='doing'))
+        self.start_v2_prepare()
 
     def test_first_read_required_and_trial_roles_are_correct(self):
         self.chapter_stage('trial')
@@ -405,6 +411,63 @@ class TaskTests(unittest.TestCase):
         proc = subprocess.run([sys.executable, script, 'gate', '--book', str(self.root), '--stage', 'S01', '--before', 'concept'], capture_output=True, text=True)
         self.assertNotEqual(proc.returncode, 0)
         self.assertFalse(json.loads(proc.stdout)['ok'])
+
+    def prepare_first_read_gate(self):
+        self.chapter_stage()
+        secret = '大纲/内部技术答案-仅核查者可读.md'
+        self.write(secret, '合成内部材料，不得进入首读反馈。')
+        self.done('prepare', 'S02')
+        self.done('draft', 'S02', inputs=[self.evidence(secret)])
+        return secret
+
+    def test_neutral_gate_success_returns_only_mechanical_identifiers(self):
+        self.prepare_first_read_gate()
+        before = nc.inventory(self.root)
+        self.assertEqual(tc.gate(self.root, 'S02', 'first_read', neutral=True),
+                         dict(ok=True, stage='S02', before='first_read'))
+        self.assertEqual(before, nc.inventory(self.root))
+
+    def test_neutral_gate_hides_stale_private_input_but_host_diagnostics_remain(self):
+        secret = self.prepare_first_read_gate()
+        self.write(secret, '合成内部材料已经变化。')
+        before = nc.inventory(self.root)
+        result = tc.gate(self.root, 'S02', 'first_read', neutral=True)
+        self.assertEqual(result, dict(ok=False, error='gate_not_ready', stage='S02', before='first_read'))
+        with self.assertRaisesRegex(ValueError, secret):
+            tc.gate(self.root, 'S02', 'first_read')
+        self.assertTrue(any(secret in issue for issue in tc.check(self.root)['issues']))
+        self.assertEqual(before, nc.inventory(self.root))
+
+    def test_neutral_gate_hides_ledger_structure_and_inventory_errors(self):
+        for failure in (ValueError('内部技术答案-结构错误'), OSError('内部技术答案-路径错误'),
+                        RuntimeError('内部技术答案-其他读取故障')):
+            with self.subTest(failure=type(failure).__name__):
+                for function in ('load', 'reading'):
+                    with patch.object(tc, function, side_effect=failure):
+                        self.assertEqual(tc.gate(self.root, 'S01', 'direction', neutral=True),
+                                         dict(ok=False, error='gate_not_ready', stage='S01', before='direction'))
+
+    def test_neutral_gate_never_echoes_nonmechanical_identifiers(self):
+        result = tc.gate(self.root, '大纲/内部技术答案.md', '作者选择了隐藏结局', neutral=True)
+        self.assertEqual(result, dict(ok=False, error='gate_not_ready'))
+
+    def test_neutral_gate_cli_does_not_expose_stale_filename_or_ledger_errors(self):
+        secret = self.prepare_first_read_gate()
+        self.write(secret, '已变化的合成内部材料。')
+        command = [sys.executable, str(Path(tc.__file__)), 'gate', '--book', str(self.root),
+                   '--stage', 'S02', '--before', 'first_read', '--neutral']
+        proc = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertEqual(json.loads(proc.stdout), dict(ok=False, error='gate_not_ready', stage='S02', before='first_read'))
+        self.assertNotIn(secret, proc.stdout + proc.stderr)
+        self.assertNotIn(str(self.root), proc.stdout + proc.stderr)
+        self.assertNotIn('stale evidence', proc.stdout + proc.stderr)
+        self.write(tc.TASK_FILE, '损坏的技术账本，含内部技术答案。')
+        proc = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertEqual(json.loads(proc.stdout)['error'], 'gate_not_ready')
+        self.assertNotIn('内部技术答案', proc.stdout + proc.stderr)
+        self.assertNotIn('managed markers', proc.stdout + proc.stderr)
 
 
 if __name__ == '__main__':

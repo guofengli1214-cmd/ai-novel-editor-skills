@@ -9,7 +9,11 @@ Optional fields are preserved. Only registered chapters are exported; pending
 operations block export. check flags unregistered top-level Markdown files.
 New books enable task_management and initialize the single task ledger.
 init_book(..., task_management=False) retains legacy fixtures without a ledger;
-the init CLI always enables task management. Export does not require finalization.
+the init CLI always enables task management and requires --title-decision JSON
+with the author's actual title choice. A supplied API title_decision is checked
+before creating directories and preserved in the author's agreement record.
+Omitting it from the low-level API retains legacy fixture compatibility.
+Export does not require finalization.
 Public API: load_state(book), check_book(book), index_book(book),
 snapshot_book(book, label), restore_book(book, snapshot), export_book(book, output).
 All writing commands are for the materials subagent; the main agent uses check.
@@ -340,7 +344,7 @@ def check_book(book, *, allow_pending=False, verify_snapshots=True):
     return issues
 
 
-def init_book(parent, title, *, task_management=True):
+def init_book(parent, title, *, task_management=True, title_decision=None):
     if type(task_management) is not bool:
         raise ValueError('task_management must be boolean')
     # Apply the portable filename rules before creating even the library path.
@@ -350,6 +354,20 @@ def init_book(parent, title, *, task_management=True):
             re.fullmatch(r'(?i:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])',
                          title.split('.')[0].rstrip(' '))):
         raise ValueError('title must be a single portable directory name (no Windows reserved names, characters or trailing space/dot)')
+    title_record = None
+    if title_decision is not None:
+        # Runtime import avoids the taskctl -> novelctl module dependency cycle.
+        # Validate before mkdir, including the otherwise missing library root.
+        import taskctl
+        errors = taskctl.title_decision_errors(title, title_decision)
+        if errors:
+            raise ValueError('; '.join(errors))
+        title_record = ('# 作者约定与授权\n\n## 初始化书名决定\n\n'
+                        '以下保留本次建书的作者决定来源；资料整理可在本文件继续扩充，'
+                        '须保留原话、范围及后续取代关系。\n\n```json\n' +
+                        json.dumps({'title': title, 'decision': title_decision},
+                                   ensure_ascii=False, indent=2) + '\n```\n\n'
+                        '此记录仅证明已申报的书名决定，不产生正文、设定、剧情或后续创作授权。\n')
     parent = Path(parent).absolute()
     if any(item.is_symlink() for item in (parent, *parent.parents)):
         raise ValueError('symbolic link in library path')
@@ -365,6 +383,8 @@ def init_book(parent, title, *, task_management=True):
         if task_management:
             state['task_management'] = True
         atomic_write(book / STATE, json.dumps(state, ensure_ascii=False, indent=2) + '\n')
+        if title_record is not None:
+            atomic_write(book / '创作约定/作者约定与授权.md', title_record)
         if task_management:
             import taskctl
             taskctl.initialize(book)
@@ -435,6 +455,9 @@ def snapshot_book(book, label):
     load_state(root)
     before = inventory(root, exclude_history=True)
     history = relative_path(root, HISTORY)
+    # The payload inventory deliberately excludes history. Check its fixed
+    # live index separately before creating even a partial new snapshot.
+    history_index = relative_path(root, HISTORY + '/索引.md')
     history.mkdir(exist_ok=True)
     snap = history / ('snapshot-' + uuid.uuid4().hex)
     snap.mkdir()
@@ -452,7 +475,7 @@ def snapshot_book(book, label):
         atomic_write(snap / '索引.md', '# 历史快照\n\n- [校验清单](manifest.json)：文件哈希、目录与快照标签。\n- [快照内容](payload/索引.md)：恢复用的原始文件，不在此处编辑。\n')
         verify_snapshot(snap)
         # Maintain only the live history directory index; never rewrite payloads.
-        history_index = history / '索引.md'
+        history_index = relative_path(root, HISTORY + '/索引.md')
         old = history_index.read_text(encoding='utf-8') if history_index.exists() else '# 历史版本\n'
         link = '- [' + snap.name + '](' + snap.name + '/索引.md)\n'
         atomic_write(history_index, old.rstrip() + '\n' + link)
@@ -464,7 +487,24 @@ def snapshot_book(book, label):
 
 def restore_book(book, snapshot):
     root = root_path(book)
-    payload = verify_snapshot(snapshot)
+    # Check ownership before reading a manifest or hashing any payload. An
+    # arbitrary valid snapshot must not import or inspect another work.
+    snap = Path(snapshot).absolute()
+    requested_root = Path(book).absolute()
+    if requested_root != root:
+        # Keep the supported Windows book-root junction usable without
+        # resolving away links inside the book before contained_path sees them.
+        try:
+            snap = root / snap.relative_to(requested_root)
+        except ValueError:
+            pass
+    history = relative_path(root, HISTORY)
+    if snap.parent != history:
+        raise ValueError('restore snapshot must be a direct child of current book history')
+    snap = contained_path(root, snap)
+    if not snap.is_dir():
+        raise ValueError('restore snapshot directory missing')
+    payload = verify_snapshot(snap)
     inventory(root)
     stage = Path(tempfile.mkdtemp(prefix='.' + root.name + '-restore-', dir=root.parent))
     recovery = root.parent / ('.' + root.name + '-recovery-' + uuid.uuid4().hex)
@@ -491,6 +531,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest='command', required=True)
     p = sub.add_parser('init'); p.add_argument('--parent', required=True); p.add_argument('--title', required=True)
+    p.add_argument('--title-decision', required=True,
+                   help='actual author title decision: JSON object, JSON-file path or @file')
     for command in ('index', 'check', 'export', 'snapshot', 'restore'):
         p = sub.add_parser(command); p.add_argument('--book', required=True)
         if command == 'check': p.add_argument('--skip-snapshots', action='store_true', help='skip immutable snapshot payload verification (read-only quick check)')
@@ -499,7 +541,13 @@ def main(argv=None):
         if command == 'restore': p.add_argument('--snapshot', required=True)
     args = parser.parse_args(argv)
     try:
-        if args.command == 'init': print(init_book(args.parent, args.title))
+        if args.command == 'init':
+            raw = args.title_decision
+            decision = (json.loads(raw) if raw.lstrip().startswith('{') else
+                        json.loads(Path(raw[1:] if raw.startswith('@') else raw).read_text(encoding='utf-8-sig')))
+            if not isinstance(decision, dict):
+                raise ValueError('title decision must be a JSON object')
+            print(init_book(args.parent, args.title, title_decision=decision))
         elif args.command == 'index': index_book(args.book)
         elif args.command == 'check':
             issues = check_book(args.book, verify_snapshots=not args.skip_snapshots)

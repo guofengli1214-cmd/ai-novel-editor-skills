@@ -43,6 +43,10 @@ class EditorialGateTests(unittest.TestCase):
             reviews=[self.review_path], prose_check=self.ev(self.prose_path),
             authorization=dict(mode='trial', source='技术夹具显式授权', approved_sha256=self.draft['sha256']),
             change_record='连贯性记录/技术变化.json')
+        self.recovery_source = '创作约定/固定技术夹具来源.md'
+        self.recovery_quote = '本测试中的预制文本和报告均是显式技术输入，仅用于验证机械流程，不证明实际创作或阅读。'
+        self.write(self.recovery_source, self.recovery_quote)
+        self.register_fixture_artifacts()
 
     def write(self, path, text):
         (self.root / path).write_text(text, encoding='utf-8')
@@ -53,6 +57,13 @@ class EditorialGateTests(unittest.TestCase):
     def ev(self, path):
         return dict(path=path, sha256=nc.digest(self.root / path))
 
+    def register_fixture_artifacts(self):
+        artifacts = [dict(path=path, sha256=sha, classification='author_input', source=self.ev(self.recovery_source),
+                          source_quote=self.recovery_quote, scope='预制技术夹具输入')
+                     for path, sha in tc.artifact_candidates(self.root)]
+        tc.recover(self.root, dict(artifacts=artifacts,
+                                  verification=dict(agent_id='fixture-main', source='显式核对预制技术输入')))
+
     def save_prose(self):
         policy = json.loads((self.root / self.policy_path).read_text(encoding='utf-8'))
         self.save(self.prose_path, dict(
@@ -60,8 +71,20 @@ class EditorialGateTests(unittest.TestCase):
             result=prosecheck.check_text((self.root / self.draft['path']).read_text(encoding='utf-8'), policy)))
 
     def checks(self, kind, outputs):
-        return {name: dict(outputs[0], summary='技术夹具覆盖 ' + name)
-                for name in tc.EDITORIAL_CHECKS.get(kind, ())}
+        checks = {name: dict(outputs[0], summary='技术夹具覆盖 ' + name)
+                  for name in tc.EDITORIAL_CHECKS.get(kind, ())}
+        if kind == 'direction':
+            decision = dict(resolution='provided', value='已提供的技术约定',
+                            source_quote='技术夹具作者：本项按已列选择执行。', scope='本次技术检查')
+            for category, topics in tc.DIRECTION_DECISIONS.items():
+                checks[category]['decisions'] = {topic: dict(decision) for topic in topics}
+            checks['startup_mode']['decision'] = dict(decision)
+            checks['author_preferences']['decisions']['title'] = dict(
+                decision, value=nc.load_state(self.root)['title'], prior_status='proposed')
+        if kind in tc.CREATIVE_DECISION_TASKS:
+            checks['creative_decisions'] = dict(
+                outputs[0], summary='机械夹具已列本轮决定', items=[], none_reason='本轮只做既有技术约定的验证，无新增创作选择')
+        return checks
 
     def done(self, stage, kind, outputs=None, **fields):
         outputs = outputs or [self.ev('审稿与修订/技术依据.md')]
@@ -69,6 +92,16 @@ class EditorialGateTests(unittest.TestCase):
                        checks=self.checks(kind, outputs),
                        verification=dict(agent_id='fixture-main', source='技术夹具显式验收'))
         request.update(fields)
+        if kind in tc.CREATIVE_DECISION_TASKS:
+            author_input = self.ev('审稿与修订/技术依据.md')
+            preflight = dict(author_input, summary='机械夹具执行前确认', items=[], none_reason='验证既有技术决定，无新增创作选择')
+            inputs = list(request.get('inputs', []))
+            if not any(item['path'] == author_input['path'] for item in inputs):
+                inputs.append(author_input)
+            request['inputs'] = inputs
+            tc.update(self.root, dict(stage=stage, task=kind, status='todo', inputs=inputs,
+                                     checks=dict(creative_decisions=preflight)))
+            tc.gate(self.root, stage, kind)
         return tc.update(self.root, request)
 
     def chapter_ready(self, policy=None):
@@ -76,6 +109,7 @@ class EditorialGateTests(unittest.TestCase):
             self.save(self.policy_path, policy)
             self.save_prose()
             self.req['prose_check'] = self.ev(self.prose_path)
+        self.register_fixture_artifacts()
         tc.plan(self.root, dict(id='S02', title='逐章技术夹具', workflow='chapter', chapter=1))
         self.done('S01', 'direction')
         self.done('S01', 'concept')
@@ -150,17 +184,21 @@ class EditorialGateTests(unittest.TestCase):
         self.assertFalse(checked['ok'])
         self.assertTrue(any('stale submitted evidence' in issue for issue in checked['issues']))
 
-    def test_unregistered_artifact_warns_and_does_not_move_cursor(self):
+    def test_unregistered_artifact_blocks_and_does_not_move_cursor(self):
+        self.write('草稿与备选/未登记技术产物.md', '合成未登记文本。')
         before = nc.inventory(self.root)
         result = tc.check(self.root)
-        self.assertTrue(result['ok'])
-        self.assertTrue(any(self.draft['path'] in warning for warning in result['warnings']))
+        self.assertFalse(result['ok'])
+        self.assertTrue(any('未登记技术产物.md' in issue for issue in result['artifact_blockers']))
         self.assertEqual(result['resume']['task'], 'S01.direction')
         self.assertEqual(before, nc.inventory(self.root))
 
     def test_missing_workflow_version_is_legacy_and_not_retroactively_rewritten(self):
         data = tc.load_plan(self.root)
         del data['stages'][0]['workflow_version']
+        del data['stages'][0]['direction_gate_version']
+        del data['stages'][0]['decision_gate_version']
+        del data['stages'][0]['execution_gate_version']
         tc.save(self.root, data)
         self.assertTrue(tc.check(self.root)['ok'])
         self.done('S01', 'direction', checks={})
@@ -203,6 +241,7 @@ class EditorialGateTests(unittest.TestCase):
         legacy = {key: self.review[key] for key in
                   ('writer_task', 'reviewer', 'draft_sha256', 'coverage', 'verdict', 'issues')}
         self.save('审稿与修订/旧格式评审.json', dict(legacy, schema_version=1))
+        self.register_fixture_artifacts()
         self.req['reviews'] = ['审稿与修订/旧格式评审.json']
         self.accept_recheck()
         before = nc.inventory(self.root)
@@ -253,6 +292,7 @@ class EditorialGateTests(unittest.TestCase):
         forged['result']['ok'] = True
         self.save(self.prose_path, forged)
         self.req['prose_check'] = self.ev(self.prose_path)
+        self.register_fixture_artifacts()
         self.accept_recheck()
         with self.assertRaisesRegex(ValueError, 'recomputed result'):
             cc.adopt(self.root, self.req)
@@ -264,6 +304,7 @@ class EditorialGateTests(unittest.TestCase):
                       result=prosecheck.check_text((self.root / self.draft['path']).read_text(encoding='utf-8'), {}))
         self.save(self.prose_path, report)
         self.req['prose_check'] = self.ev(self.prose_path)
+        self.register_fixture_artifacts()
         self.accept_recheck()
         with self.assertRaisesRegex(ValueError, 'current draft/policy/recomputed'):
             cc.adopt(self.root, self.req)

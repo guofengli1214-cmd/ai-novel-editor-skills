@@ -23,6 +23,9 @@ class TaskIntegrationTests(unittest.TestCase):
         # success/failure chain lives in test_editorial_gates.py.
         data = tc.load_plan(self.book)
         data['stages'][0]['workflow_version'] = 1
+        data['stages'][0].pop('direction_gate_version', None)
+        data['stages'][0].pop('decision_gate_version', None)
+        data['stages'][0].pop('execution_gate_version', None)
         tc.save(self.book, data)
         self.write('草稿与备选/第一章.md', '仅用于机械测试的正文夹具。')
         self.sha = nc.digest(self.book / '草稿与备选/第一章.md')
@@ -130,7 +133,9 @@ class TaskIntegrationTests(unittest.TestCase):
         self.assertEqual(nc.load_state(self.book)['pending_operations'], [])
         proc = subprocess.run(
             [sys.executable, str(Path(nc.__file__)), 'init', '--parent', str(self.parent),
-             '--title', 'CLI默认任务'], capture_output=True, text=True)
+             '--title', 'CLI默认任务', '--title-decision', json.dumps(dict(
+                 resolution='provided', value='CLI默认任务', source_quote='合成作者明确给定此技术书名。',
+                 scope='CLI初始化技术夹具', prior_status='proposed'), ensure_ascii=False)], capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         created = self.parent / 'CLI默认任务'
         self.assertIs(nc.load_state(created)['task_management'], True)
