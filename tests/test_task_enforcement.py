@@ -213,6 +213,8 @@ class TaskEnforcementTests(unittest.TestCase):
         for category, topics in tc.DIRECTION_DECISIONS.items():
             checks[category]['decisions'] = {topic: dict(decision) for topic in topics}
         checks['startup_mode']['decision'] = dict(decision)
+        checks['author_preferences']['decisions']['hidden_plot'] = dict(
+            decision, value='disabled')
         checks['author_preferences']['decisions']['title'] = dict(decision, value=self.root.name, prior_status='proposed')
         tc.update(self.root, dict(stage='S01', task='direction', status='done', outputs=[evidence],
                                   checks=checks, verification=self.verification))

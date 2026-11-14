@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Mechanical chapter adoption gates; standard library only.
 
-Subagents: adopt --book DIR --request JSON; finish --book DIR --request JSON.
+Subagents: adopt/resume/finish --book DIR --request JSON.
 Main agent: check --book DIR (read only). JSON is an inline object or @file.
 Host MUST independently compare actual writer/reviewer agent identities: JSON
 identities and authorizations are assertions, not authenticated credentials.
@@ -33,11 +33,18 @@ handoff:{path,chapter:int}. Handoff text includes 第N章, 第000N章 or formal 
 
 Backups and durable journal live under 历史版本/chapter-<operation_id>.
 Pending contains the full request, hashes and backup paths. Any pending blocks
-adopt, including retries. Interrupted adoption needs explicit manual recovery
-from journal/backup; finish only accepts an installed chapter. Never manufacture
+adopt, including retries. resume: {operation_id} validates a checksum archive,
+the original state, current evidence and adoption task before completing the same
+interrupted installation; it never creates a new operation. finish only accepts
+an installed chapter. Never manufacture
 subagent completion records. Concurrent cooperating writers are serialized;
 Stale locks require unlock with confirm_no_writer:true and expected_pending:[IDs].
 Unlock preserves pending operations and their journals; recovery remains explicit.
+quarantine --request {operation_id,confirm_unused:true,reason,verification:{agent_id,source},expected_pending?:[IDs]}
+preserves an unreferenced orphan archive in a unique sibling directory. It scans
+state, complete ledgers, other archives and snapshots, and rejects any real reference
+to the target; pending IDs must exactly match expected_pending (default []).
+Only generated index links are ignored and refreshed.
 New Windows locks bind the owner PID to its process creation time. Legacy locks
 without that identity retain the conservative live-PID check; no force bypass.
 Other tools/agents must not mutate the book during either writing command.
@@ -67,6 +74,7 @@ change_record: {"draft_sha256":"H","categories":{"intent":"unchanged",
 "handoff":{"path":"创作约定/交接.md","chapter":1}}
 """
 import argparse
+import copy
 from contextlib import contextmanager
 import difflib
 import hashlib
@@ -263,6 +271,85 @@ def unlock(book, request):
                     recovery_notice='Pending operations and journals are unchanged; recover or finish them before adopting.')
     finally:
         recovery.rmdir()
+
+
+def quarantine(book, request):
+    """Preserve an unreferenced orphan outside the work; never waive evidence."""
+    root = nc.root_path(book)
+    req = obj(request)
+    operation = req.get('operation_id')
+    require(isinstance(operation, str) and re.fullmatch('[0-9a-f]{32}', operation),
+            'invalid adoption operation_id')
+    require(req.get('confirm_unused') is True and nonempty(req.get('reason')),
+            'quarantine requires confirm_unused:true and a reason')
+    verification = obj(req.get('verification'))
+    require(nonempty(verification.get('agent_id')) and nonempty(verification.get('source')),
+            'quarantine requires host verification provenance')
+    expected = req.get('expected_pending', [])
+    require(isinstance(expected, list) and all(nonempty(value) for value in expected)
+            and len(set(expected)) == len(expected), 'invalid expected_pending operation IDs')
+    with locked(root):
+        state = nc.load_state(root)
+        actual = [obj(item).get('operation_id') for item in state['pending_operations']]
+        require(all(nonempty(value) for value in actual) and sorted(actual) == sorted(expected),
+                'pending operations do not match expected_pending; inspect and explicitly list all IDs')
+        require(operation not in actual, 'cannot quarantine a pending operation')
+        source_rel = nc.HISTORY + '/chapter-' + operation
+        source = nc.relative_path(root, source_rel)
+        require(source.is_dir(), 'adoption archive directory missing')
+        before = nc.inventory(root)
+        references = []
+        token = operation.encode('ascii')
+        for name in before[0]:
+            if name == source_rel or name.startswith(source_rel + '/'):
+                continue
+            path = nc.relative_path(root, name)
+            data = path.read_bytes()
+            if path.name == '索引.md':
+                # Generated discovery links are not proof of an adopted result;
+                # all author annotations, ledgers and snapshot manifests count.
+                text = data.decode('utf-8')
+                if nc.BEGIN in text and nc.END in text:
+                    text = text[:text.index(nc.BEGIN)] + text[text.index(nc.END) + len(nc.END):]
+                data = text.encode('utf-8')
+            if token in data:
+                references.append(name)
+        require(not references, 'adoption archive is still referenced: ' + ', '.join(references))
+        legacy = [chapter for chapter in state['chapters'] if not chapter.get('adoption_operation_id')]
+        if legacy:
+            try:
+                journal = read_json(source / 'journal.json')
+            except (ValueError, OSError, TypeError, KeyError) as exc:
+                raise ValueError('cannot prove archive unused while legacy formal chapters lack operation pointers') from exc
+            require(not any(chapter['sha256'] == journal.get('draft_sha256') and
+                            (chapter['number'] == journal.get('number') or chapter['path'] == journal.get('target'))
+                            for chapter in legacy),
+                    'adoption archive is still referenced or ambiguous for a legacy formal chapter')
+        history_index = nc.relative_path(root, nc.HISTORY + '/索引.md')
+        if history_index.exists():
+            text = history_index.read_text(encoding='utf-8')
+            require(text.count(nc.BEGIN) == text.count(nc.END) and text.count(nc.BEGIN) <= 1
+                    and (nc.BEGIN not in text or text.index(nc.BEGIN) < text.index(nc.END)),
+                    'malformed history index; preserve and repair before quarantine')
+        preserved = nc.inventory(source)
+        destination = root.parent / ('.' + root.name + '-quarantine-' + uuid.uuid4().hex)
+        destination.mkdir()
+        receipt = dict(schema_version=1, kind='unreferenced_adoption_quarantine',
+                       book=str(root), operation_id=operation, original_path=source_rel,
+                       reason=req['reason'], verification=verification,
+                       files=preserved[0], directories=preserved[1])
+        save(destination / 'quarantine.json', receipt)
+        require(nc.inventory(root) == before, 'book changed during quarantine verification')
+        os.rename(source, destination / source.name)
+        require(nc.inventory(destination / source.name) == preserved,
+                'quarantine copy changed; preserved evidence requires inspection')
+        try:
+            nc.index_directory(root, root / nc.HISTORY)
+        except (ValueError, OSError) as exc:
+            raise ValueError('archive preserved at ' + str(destination) + '; refresh history index before continuing: ' + str(exc)) from exc
+        return dict(ok=True, operation_id=operation, pending_operations=actual, quarantine=str(destination),
+                    receipt=str(destination / 'quarantine.json'),
+                    notice='Archive preserved outside work; no authorizations or completion records were created.')
 
 
 def evidence_file(root, value, label):
@@ -543,6 +630,91 @@ def adopt(book, request):
         return _adopt(root, obj(request))
 
 
+def adopted_state(prior, pending, reviewers, prose_policy):
+    """Reconstruct exactly the state installed by this immutable request."""
+    state, pending = copy.deepcopy(prior), copy.deepcopy(pending)
+    req = pending['request']
+    old = next((chapter for chapter in state['chapters'] if chapter['number'] == pending['number']), None)
+    writer = req['writer']
+    entry = dict(old or {})
+    entry.update(number=pending['number'], path=pending['target'], sha256=pending['draft_sha256'],
+                 adoption_operation_id=pending['operation_id'],
+                 writer_task=writer['task_id'], writer_agent=writer['agent_id'],
+                 review_path=req['reviews'][0], reviewer_task=reviewers[0]['task_id'],
+                 review_paths=req['reviews'], reviewers=reviewers, authorization=req['authorization'],
+                 review_hashes=pending['review_hashes'])
+    if pending.get('task_stage') is not None:
+        entry['task_stage'] = pending['task_stage']
+        entry['workflow_version'] = req['workflow_version']
+        if req['workflow_version'] >= 2:
+            entry['prose_check'] = req['prose_check']
+            entry['prose_policy'] = prose_policy
+    state['chapters'] = [chapter for chapter in state['chapters'] if chapter['number'] != pending['number']] + [entry]
+    state['chapters'].sort(key=lambda chapter: chapter['number'])
+    pending['phase'] = 'adopted'
+    state['pending_operations'] = [pending]
+    return state
+
+
+def resume(book, request):
+    """Complete a prepared installation using its original operation and evidence."""
+    root = nc.root_path(book)
+    req = obj(request)
+    with locked(root):
+        before = nc.inventory(root)
+        state = nc.load_state(root)
+        operations = state['pending_operations']
+        require(len(operations) == 1, 'resume requires one pending adoption')
+        pending = obj(operations[0])
+        operation = req.get('operation_id')
+        require(pending.get('kind') == 'chapter_adopt' and pending.get('operation_id') == operation,
+                'resume operation mismatch')
+        journal = validate_adoption_archive(root, operation, pending=pending)
+        require(journal.get('archive_version') == 1,
+                'resume requires a checksum adoption archive; recover legacy operations from a verified snapshot')
+        require(pending['phase'] in ('prepared', 'adopted') and journal['phase'] != 'completed',
+                'installation already completed; continue synchronization with finish')
+        original = pending['request']
+        prior = read_json(file_path(root, pending['state_backup']))
+        target = nc.relative_path(root, pending['target'])
+        target_sha = nc.digest(target) if target.is_file() else None
+        require(not target.exists() or target.is_file(), 'resume target is not a regular file')
+        if pending['phase'] == 'prepared':
+            prepared = copy.deepcopy(prior)
+            prepared['pending_operations'] = [pending]
+            require(state == prepared, 'current state differs from the prepared adoption')
+            require(target_sha in (pending['original_sha256'], pending['draft_sha256']),
+                    'resume target changed outside the interrupted adoption; preserve manual edits first')
+        else:
+            require(target_sha == pending['draft_sha256'], 'installed chapter changed after adoption')
+        draft = file_path(root, original.get('draft'))
+        require(nc.digest(draft) == pending['draft_sha256'], 'resume draft changed after adoption started')
+        reviewers = validate_reviews(root, original['reviews'], original['writer'], pending['draft_sha256'])
+        require(all(nc.digest(file_path(root, name)) == sha for name, sha in pending['review_hashes'].items()),
+                'review changed after adoption started')
+        policy = None
+        if original.get('workflow_version', 1) >= 2:
+            report = read_json(evidence_file(root, original.get('prose_check'), 'prose check report'))
+            policy = obj(report.get('policy'))
+        installed = adopted_state(prior, pending, reviewers, policy)
+        if pending['phase'] == 'adopted':
+            require(state == installed, 'current state differs from the installed adoption')
+        import taskctl
+        task_stage = taskctl.require_adoption(root, original, resume_operation=operation)
+        require(task_stage == pending.get('task_stage'), 'resume task stage differs from the original adoption')
+        validated_policy = validate_prose_check(root, original, pending['draft_sha256'], task_stage)
+        require(validated_policy == policy, 'resume prose policy differs from the original adoption')
+        require(nc.inventory(root) == before, 'book changed during resume validation')
+        if target_sha != pending['draft_sha256']:
+            nc.atomic_write(target, file_path(root, pending['draft_backup']).read_bytes())
+        if pending['phase'] == 'prepared':
+            save(root / nc.STATE, installed)
+        if journal['phase'] == 'prepared':
+            save(nc.relative_path(root, pending['backup'] + '/journal.json'), installed['pending_operations'][0])
+        return dict(ok=True, operation_id=operation, draft_sha256=pending['draft_sha256'],
+                    pending=True, backup=pending['backup'], resumed=True)
+
+
 def _adopt(root, req):
     req = dict(req)  # Add the selected task stage without mutating the caller.
     state = nc.load_state(root)
@@ -612,22 +784,8 @@ def _adopt(root, req):
     save(root / nc.STATE, state)
     # Once pending is durable, failures are deliberately left recoverable.
     nc.atomic_write(target, data)
-    entry = dict(old or {})
-    entry.update(number=number, path=req['target'], sha256=sha,
-                 adoption_operation_id=operation,
-                 writer_task=writer['task_id'], writer_agent=writer['agent_id'],
-                 review_path=reviews[0], reviewer_task=reviewers[0]['task_id'],
-                 review_paths=reviews, reviewers=reviewers, authorization=auth,
-                 review_hashes=pending['review_hashes'])
-    if task_stage is not None:
-        entry['task_stage'] = task_stage
-        entry['workflow_version'] = req['workflow_version']
-        if req['workflow_version'] >= 2:
-            entry['prose_check'] = req['prose_check']
-            entry['prose_policy'] = prose_policy
-    state['chapters'] = [c for c in state['chapters'] if c['number'] != number] + [entry]
-    state['chapters'].sort(key=lambda c: c['number'])
-    pending['phase'] = 'adopted'
+    state = adopted_state(state, pending, reviewers, prose_policy)
+    pending = state['pending_operations'][0]
     save(root / nc.STATE, state)
     save(backup / 'journal.json', pending)
     return dict(ok=True, operation_id=operation, draft_sha256=sha, pending=True, backup=backup_rel)
@@ -749,7 +907,7 @@ def check(book, *, verify_snapshots=True):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     subs = parser.add_subparsers(dest='command', required=True)
-    for command in ('adopt', 'finish', 'check', 'unlock', 'diff'):
+    for command in ('adopt', 'resume', 'finish', 'check', 'unlock', 'quarantine', 'diff'):
         sub = subs.add_parser(command)
         sub.add_argument('--book', required=True)
         if command == 'diff':

@@ -146,7 +146,10 @@ class TaskTests(unittest.TestCase):
         tasks = self.data()['stages'][0]['tasks']
         self.assertEqual([task['status'] for task in tasks], ['todo', 'todo', 'todo'])
         self.assertTrue(all(task['history'] for task in tasks))
-        self.assertTrue(tasks[1]['outputs'])
+        self.assertEqual(tasks[1]['outputs'], [])
+        self.assertTrue(tasks[1]['history'][-1]['outputs'])
+        self.assertTrue(tasks[1]['dependency_restart_required'])
+        self.assertTrue(tasks[2]['dependency_restart_required'])
         self.assertIsNone(tasks[1]['verification'])
         self.assertTrue(any(item['status'] == 'done' for item in tasks[1]['history']))
         self.assertTrue(tc.check(self.root)['ok'])  # Unfinished work is not an error.

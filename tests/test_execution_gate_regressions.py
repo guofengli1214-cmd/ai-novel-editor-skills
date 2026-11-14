@@ -46,10 +46,15 @@ class ExecutionGateRegressionTests(unittest.TestCase):
 
     def configure_specialist(self, task_id):
         source = self.f.ev('审稿与修订/技术依据.md')
+        items = []
+        if tc.selected_task(self.stage(), task_id)['kind'] == 'hidden_plot_management':
+            items = [dict(id='fixture-hidden-choice', topic='hidden_plot',
+                          record_id='fixture-author-hidden-choice', resolution='provided', value='enabled',
+                          source_quote='合成作者主动给定：本技术项目启用暗线管理。', scope='本次机械同步测试')]
         tc.update(self.root, dict(
             stage='S02', task=task_id, status='todo', inputs=[source],
             checks=dict(creative_decisions=dict(
-                source, summary='只记录已采用稿的技术同步依据', items=[],
+                source, summary='只记录已采用稿的技术同步依据', items=items,
                 none_reason='本轮没有新增创作选择。'))))
 
     def test_gate_rechecks_target_inputs_for_all_diagnostics_modes_without_writes(self):
@@ -103,6 +108,7 @@ class ExecutionGateRegressionTests(unittest.TestCase):
         self.assertEqual(len(nc.load_state(self.root)['pending_operations']), 1)
 
     def test_pending_allows_only_specialists_in_the_current_adopt_to_sync_chain(self):
+        self.f.hidden_plot_choice = 'enabled'
         self.pending_adoption()
         for index, kind in enumerate(sorted(tc.MANAGEMENT_TASK_KINDS)):
             task_id = 'S02.post_' + str(index)

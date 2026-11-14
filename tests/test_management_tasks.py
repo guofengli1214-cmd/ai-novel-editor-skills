@@ -10,8 +10,8 @@ import test_editorial_gates as fixtures
 
 
 tc, nc, cc = fixtures.tc, fixtures.nc, fixtures.cc
-KINDS = ('storyline_management', 'hook_management', 'curve_direction')
-ACTIVE_FILES = ('故事线/故事线管理.md', '线索与悬念/钩子管理.md', '曲线与节奏/故事起伏曲线.md')
+KINDS = ('hidden_plot_management', 'storyline_management', 'hook_management', 'curve_direction')
+ACTIVE_FILES = ('故事线/暗线剧情管理.md', '故事线/故事线管理.md', '线索与悬念/钩子管理.md', '曲线与节奏/故事起伏曲线.md')
 
 
 class ManagementTaskTests(unittest.TestCase):
@@ -20,6 +20,7 @@ class ManagementTaskTests(unittest.TestCase):
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         self.root = self.fixture.root
+        self.fixture.hidden_plot_choice = 'enabled'
         self.source = self.fixture.ev('审稿与修订/技术依据.md')
 
     def enter_chapter(self):
@@ -52,7 +53,7 @@ class ManagementTaskTests(unittest.TestCase):
         deps = [] if predecessor is None else [predecessor]
         tasks = [self.task(kind, task_id, deps) for kind, task_id in zip(KINDS, ids)]
         if curve_dependencies:
-            tasks[-1]['depends_on'] += ids[:2]
+            tasks[-1]['depends_on'] += ids[:-1]
         core = tc.selected_task(stage, before)
         core['depends_on'] += ids
         index = stage['tasks'].index(core)
@@ -61,9 +62,16 @@ class ManagementTaskTests(unittest.TestCase):
         tc.save(self.root, data)
         return ids
 
+    def hidden_choice(self):
+        return dict(id='fixture-hidden-choice', topic='hidden_plot', record_id='fixture-hidden-author-decision',
+                    resolution='provided', value='enabled', source_quote='合成作者已主动要求暗线管理。',
+                    scope='本次专项管理机械测试')
+
     def configure(self, task_id, check=None):
+        if check is None:
+            check = self.creative_check([self.hidden_choice()] if 'hidden_plot_management' in task_id else None)
         tc.update(self.root, dict(stage='S02', task=task_id, status='todo', inputs=[self.source],
-                                  checks=dict(creative_decisions=self.creative_check() if check is None else check)))
+                                  checks=dict(creative_decisions=check)))
 
     def accept(self, task_id, approved=False):
         items = None
@@ -72,6 +80,8 @@ class ManagementTaskTests(unittest.TestCase):
                           resolution='selected', value='合成已选技术选项',
                           question_quote='合成技术提问：选择已有选项A还是B？',
                           source_quote='合成技术答复：选择A。', scope='本次机械专项测试')]
+        if 'hidden_plot_management' in task_id:
+            items = (items or []) + [self.hidden_choice()]
         self.configure(task_id, self.creative_check(items))
         tc.gate(self.root, 'S02', task_id)
         tc.update(self.root, dict(stage='S02', task=task_id, status='doing'))
@@ -161,6 +171,56 @@ class ManagementTaskTests(unittest.TestCase):
                     tc.gate(self.root, 'S02', task_id)
                 self.configure(task_id)
                 self.assertTrue(tc.gate(self.root, 'S02', task_id)['ok'])
+
+    def test_hidden_management_needs_one_enabled_choice_for_start_submission_and_acceptance(self):
+        self.fixture.hidden_plot_choice = 'disabled'
+        self.enter_chapter()
+        task_id = self.add_tasks(curve_dependencies=False)[0]
+        enabled = self.hidden_choice()
+        cases = [[], [dict(enabled, value='disabled')],
+                 [dict(enabled, resolution='unresolved')],
+                 [dict(enabled, topic='unrelated')],
+                 [enabled, dict(enabled, id='other')]]
+        for items in cases:
+            with self.subTest(items=items):
+                check = self.creative_check(items)
+                self.configure(task_id, check)
+                before = nc.inventory(self.root)
+                with self.assertRaisesRegex(ValueError, 'hidden_plot'):
+                    tc.gate(self.root, 'S02', task_id)
+                for status in ('doing', 'submitted', 'done'):
+                    with self.assertRaisesRegex(ValueError, 'hidden_plot'):
+                        tc.update(self.root, dict(stage='S02', task=task_id, status=status,
+                            outputs=[] if status == 'doing' else [self.source],
+                            verification=dict(agent_id='fixture-main', source='不能代替实际启用决定')))
+                self.assertEqual(nc.inventory(self.root), before)
+        # A real later choice can supersede the first disabled choice. The host
+        # must verify that quoted scope and provenance, rather than infer consent.
+        self.configure(task_id)
+        self.assertTrue(tc.gate(self.root, 'S02', task_id)['ok'])
+
+    def test_hidden_management_enabling_choice_also_applies_to_legacy_stage(self):
+        self.enter_chapter()
+        task_id = self.add_tasks(curve_dependencies=False)[0]
+        data = tc.load_plan(self.root)
+        stage = data['stages'][-1]
+        stage['workflow_version'] = 1
+        for key in ('decision_gate_version', 'execution_gate_version', 'result_gate_version'):
+            stage.pop(key)
+        tc.save(self.root, data)
+        self.configure(task_id, self.creative_check())
+        before = nc.inventory(self.root)
+        for status in ('doing', 'submitted', 'done'):
+            with self.assertRaisesRegex(ValueError, 'hidden_plot'):
+                tc.update(self.root, dict(stage='S02', task=task_id, status=status,
+                    outputs=[] if status == 'doing' else [self.source],
+                    verification=dict(agent_id='fixture-main', source='旧阶段也不能代替启用依据')))
+        with self.assertRaisesRegex(ValueError, 'hidden_plot'):
+            tc.gate(self.root, 'S02', task_id)
+        self.assertEqual(nc.inventory(self.root), before)
+        self.configure(task_id)
+        tc.gate(self.root, 'S02', task_id)
+        self.assertEqual(tc.update(self.root, dict(stage='S02', task=task_id, status='doing'))['status'], 'doing')
 
     def test_prepare_waits_for_all_approved_specialist_outputs_and_rejects_stale_evidence(self):
         self.enter_chapter()

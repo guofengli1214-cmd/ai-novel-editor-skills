@@ -254,7 +254,9 @@ class FinalizationDeferTests(unittest.TestCase):
             if task['kind'] in KINDS or task['kind'] == 'whole_recheck':
                 self.assertEqual(task['status'], 'todo')
                 self.assertEqual(task['history'][-1]['status'], 'done')
-                self.assertTrue(task['outputs'])
+                self.assertEqual(task['outputs'], [])
+                self.assertTrue(task['history'][-1]['outputs'])
+                self.assertTrue(task['dependency_restart_required'])
         path = self.root / reports[0]['path']
         original = path.read_bytes()
         path.write_bytes(original + b'\nchanged fixture\n')

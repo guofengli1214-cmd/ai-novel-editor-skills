@@ -42,6 +42,8 @@ class DecisionGateTests(unittest.TestCase):
             checks[category]['decisions'] = {topic: self.choice() for topic in topics}
         checks['author_preferences']['decisions']['title'] = self.title_choice()
         checks['startup_mode']['decision'] = self.choice()
+        checks['author_preferences']['decisions']['hidden_plot'] = dict(
+            self.choice(), value='disabled')
         return checks
 
     def accept_direction(self, checks=None):
@@ -66,8 +68,8 @@ class DecisionGateTests(unittest.TestCase):
         for workflow in tc.WORKFLOWS:
             with self.subTest(workflow=workflow):
                 self.assertEqual(tc.new_stage('S1', '合成阶段', workflow, chapter=1)['decision_gate_version'], 1)
-                if workflow in tc.STANDALONE_WORKFLOWS:
-                    with self.assertRaisesRegex(ValueError, 'standalone workflows require workflow v2'):
+                if workflow in tc.STANDALONE_WORKFLOWS | {'trial_only', 'outline'}:
+                    with self.assertRaisesRegex(ValueError, 'require.*workflow v2'):
                         tc.new_stage('S1', '旧阶段', workflow, chapter=1, workflow_version=1)
                 else:
                     self.assertNotIn('decision_gate_version', tc.new_stage('S1', '旧阶段', workflow, chapter=1, workflow_version=1))
@@ -227,14 +229,21 @@ class DecisionGateTests(unittest.TestCase):
     def test_all_selected_task_kinds_apply_same_decision_checks(self):
         for kind in tc.CREATIVE_DECISION_TASKS:
             with self.subTest(kind=kind):
-                stage = tc.new_stage('S2', '合成阶段', 'chapter', chapter=1)
+                workflow = 'outline' if kind.startswith('outline_') else 'chapter'
+                stage = tc.new_stage('S2', '合成阶段', workflow, chapter=1)
                 task = dict(kind=kind, checks={}, inputs=[self.evidence()], outputs=[])
                 self.assertTrue(tc.decision_preflight_errors(self.root, stage, task))
                 task['checks']['creative_decisions'] = self.creative_check()
-                self.assertEqual(tc.decision_preflight_errors(self.root, stage, task), [])
+                if kind == 'hidden_plot_management':
+                    self.assertTrue(tc.decision_preflight_errors(self.root, stage, task))
+                else:
+                    self.assertEqual(tc.decision_preflight_errors(self.root, stage, task), [])
                 del task['checks']['creative_decisions']['none_reason']
                 self.assertTrue(tc.decision_preflight_errors(self.root, stage, task))
-                task['checks']['creative_decisions'] = self.creative_check([self.creative_item('selected')])
+                item = self.creative_item('selected')
+                if kind == 'hidden_plot_management':
+                    item.update(topic='hidden_plot', value='enabled')
+                task['checks']['creative_decisions'] = self.creative_check([item])
                 self.assertEqual(tc.decision_preflight_errors(self.root, stage, task), [])
 
     def test_missing_records_duplicate_ids_and_generic_delegation_are_rejected(self):

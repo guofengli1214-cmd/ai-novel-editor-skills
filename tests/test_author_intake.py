@@ -26,6 +26,8 @@ class AuthorIntakeTests(unittest.TestCase):
         for category, topics in tc.DIRECTION_DECISIONS.items():
             checks[category]['decisions'] = {topic: self.decision(resolution) for topic in topics}
         checks['startup_mode']['decision'] = self.decision(resolution)
+        checks['author_preferences']['decisions']['hidden_plot'] = dict(
+            self.decision(resolution), value='disabled')
         checks['author_preferences']['decisions']['title'] = dict(
             self.decision(resolution), value=nc.load_state(self.root)['title'], prior_status='proposed')
         return checks
@@ -58,6 +60,7 @@ class AuthorIntakeTests(unittest.TestCase):
         data = tc.load_plan(self.root)
         stage = data['stages'][0]
         stage.pop('direction_gate_version', None)
+        stage.pop('hidden_plot_gate_version', None)
         stage.pop('decision_gate_version', None)
         stage.pop('execution_gate_version', None)
         stage.pop('result_gate_version', None)

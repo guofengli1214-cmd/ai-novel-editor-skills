@@ -79,6 +79,8 @@ class EditorialGateTests(unittest.TestCase):
             for category, topics in tc.DIRECTION_DECISIONS.items():
                 checks[category]['decisions'] = {topic: dict(decision) for topic in topics}
             checks['startup_mode']['decision'] = dict(decision)
+            checks['author_preferences']['decisions']['hidden_plot'] = dict(
+                decision, value=getattr(self, 'hidden_plot_choice', 'disabled'))
             checks['author_preferences']['decisions']['title'] = dict(
                 decision, value=nc.load_state(self.root)['title'], prior_status='proposed')
         if kind in tc.CREATIVE_DECISION_TASKS:
@@ -129,7 +131,9 @@ class EditorialGateTests(unittest.TestCase):
     def accept_recheck(self):
         self.done('S02', 'recheck', [self.ev(path) for path in self.req['reviews']] + [self.ev(self.prose_path)],
                   inputs=[self.draft])
-        tc.update(self.root, dict(stage='S02', task='adopt', status='doing'))
+        tc.update(self.root, dict(stage='S02', task='adopt', status='doing',
+            inputs=[self.draft, *[self.ev(path) for path in self.req['reviews']], self.ev(self.prose_path)],
+            reason='已核对当前技术稿、复核报告及执行政策，重新启动采用。'))
 
     def prepare_sync(self, operation):
         self.done('S02', 'adopt', [self.ev(self.req['target'])], operation_id=operation['operation_id'])
@@ -202,6 +206,7 @@ class EditorialGateTests(unittest.TestCase):
         data = tc.load_plan(self.root)
         del data['stages'][0]['workflow_version']
         del data['stages'][0]['direction_gate_version']
+        data['stages'][0].pop('hidden_plot_gate_version', None)
         del data['stages'][0]['decision_gate_version']
         del data['stages'][0]['execution_gate_version']
         data['stages'][0].pop('result_gate_version', None)

@@ -24,6 +24,7 @@ class TaskIntegrationTests(unittest.TestCase):
         data = tc.load_plan(self.book)
         data['stages'][0]['workflow_version'] = 1
         data['stages'][0].pop('direction_gate_version', None)
+        data['stages'][0].pop('hidden_plot_gate_version', None)
         data['stages'][0].pop('decision_gate_version', None)
         data['stages'][0].pop('execution_gate_version', None)
         data['stages'][0].pop('result_gate_version', None)

@@ -4,13 +4,15 @@
 The authoritative JSON and its derived Markdown checkboxes live together in
 创作约定/任务计划与验收.md. Notes outside the managed markers are preserved.
 init creates S01 in planning, materials or review_only mode; plan accepts {id,title,workflow,chapter?,next_stage?,
-end_reason?,direction_gate_version?}. update accepts {stage,task,status,inputs?,outputs?,verification?,
+end_reason?,direction_gate_version?,hidden_plot_gate_version?}. update accepts {stage,task,status,inputs?,outputs?,verification?,
 reason?,operation_id?,checks?}; submit uses the same request without status and
 registers actual outputs as submitted, never accepted. New stages default to
 workflow_version 2; a missing version means historical version 1.
 New v2 planning stages also use direction_gate_version 1: direction checks
 record resolved author decisions before submission or acceptance. This checks
 declared fields and evidence, not whether quoted words prove real authorization.
+New v2 planning also uses hidden_plot_gate_version 1: an explicit enabled/disabled
+hidden-plot decision is required, without retroactively changing older stages.
 New v2 stages use decision_gate_version 1 for decisive choices: author-supplied
 choices or actual questions/answers; delegated choices require the explicit
 all-recommendations/no-further-questions exception. Old stages are not upgraded.
@@ -29,12 +31,20 @@ to archive and reset a settled current finalization, insert a v2 chapter revisio
 before it, and require fresh whole-book work after that revision closes.
 
 Commands: init, plan, update, submit, recover, defer, render, check [--stage ID],
-gate --stage ID --before KIND_OR_TASK_ID, close --stage ID. All take --book DIR.
+gate --stage ID --before KIND_OR_TASK_ID, close --stage ID, outline-revise,
+outline-rescope (an explicit option after two blocked revisions, or a real author
+change after the latest pass with choice.mode=author_revision, before acceptance).
+All take --book DIR. The v2 outline workflow keeps the candidate submitted
+through independent review, allows at most two revision/recheck rounds, and
+requires final current-version author confirmation before chapter work.
 plan/update/defer --request
 accept inline JSON, @file or a JSON-file path. render refreshes checkboxes after
 intentional JSON edits (including optional research tasks). It does not grant
 acceptance. Only the current stage can execute; close moves the cursor without
-executing its successor. Plan only the current and next stage, not a whole book.
+executing its successor. Plan only the current and next stage, not a whole book. trial_only delivers
+only candidates and independent comparison feedback; plan may explicitly narrow
+a current v2 trial after feedback, preserving its prior scope and rejecting any
+started later work (reason, end_reason and verification are required).
 Writes use the chapter writer lock and atomic replacement, and never index.
 Checks/gates are read-only with before/after inventory checks. No model calls,
 literary scoring or second task-state file. Host agents must verify real work.
@@ -56,14 +66,17 @@ from pathlib import Path
 import re
 
 import novelctl as nc
+import outlineflow as of
 
 TASK_FILE = '创作约定/任务计划与验收.md'
 BEGIN = '<!-- taskctl:begin -->'
 END = '<!-- taskctl:end -->'
 WORKFLOWS = {
     'planning': 'direction concept next_plan'.split(),
+    'outline': 'outline_draft outline_review outline_acceptance next_plan'.split(),
     'chapter': 'prepare draft first_read review revise recheck adopt sync next_plan'.split(),
     'trial': 'prepare voice_trial draft first_read review revise recheck adopt sync next_plan'.split(),
+    'trial_only': 'prepare voice_trial voice_first_read next_plan'.split(),
     'finalization': 'whole_read structural_revision whole_recheck finalize next_plan'.split(),
     'materials': 'scope organize next_plan'.split(),
     'review_only': 'scope read_only_review next_plan'.split(),
@@ -71,7 +84,15 @@ WORKFLOWS = {
 STANDALONE_WORKFLOWS = {'materials', 'review_only'}
 STATUSES = {'todo', 'doing', 'submitted', 'done', 'blocked', 'not_applicable'}
 FINISHED = {'done', 'not_applicable'}
+CLOSED_STAGES = {'done', 'superseded'}
 TASK_DEFAULTS = {
+    'outline_draft': ('全书章目候选', 'writer', '交付不可变章目候选；submitted 可进入独立审读，最终验收前不标通过。'),
+    'outline_review': ('全书章目独立审读', 'reviewer', '绑定当前候选，逐项区分结构阻断、跟踪风险及局部留白。'),
+    'outline_revision_1': ('章目第一轮针对性修订', 'writer', '按当前报告最小修正，另存候选并保留旧版本。'),
+    'outline_recheck_1': ('章目第一轮独立复核', 'reviewer', '复核本轮不可变候选；报告完成不代表章目通过。'),
+    'outline_revision_2': ('章目第二轮针对性修订', 'writer', '最后一轮自动修订，另存候选与意见处理。'),
+    'outline_recheck_2': ('章目第二轮独立复核', 'reviewer', '仍有阻断时给出二至三个具体结构方案及代价，停止自动循环。'),
+    'outline_acceptance': ('章目最终验收与作者确认', 'materials', '仅按最新通过报告与作者对当前版本的明确确认验收。'),
     'scope': ('确认本轮独立任务范围', 'materials', '只记录作者已有的本轮授权、允许输入、可写产物及结束条件；不补创作方向问卷或扩大任务。'),
     'organize': ('整理已有作品材料', 'materials', '按原件整理、索引和标注未知或冲突，不新增设定、情节、大纲或正文；留下来源及接续。'),
     'read_only_review': ('只读审查既有稿件', 'reviewer', '另一真实子 agent 阅读指定现有版本并保存意见及限制；不改稿、不正式采用、不冒充全书定稿。'),
@@ -80,6 +101,7 @@ TASK_DEFAULTS = {
     'next_plan': ('细化下一阶段或记录结束', 'materials', '下一阶段已有具体任务，或明确本次授权结束。'),
     'prepare': ('写前资料与场景准备', 'materials', '核对相关原文、故事时点与本次场景任务。'),
     'voice_trial': ('语言与叙述试写', 'writer', '在作者已选比较范围内产出实质不同候选，记录对照与待选状态，不提前认定最终声音。'),
+    'voice_first_read': ('候选独立比较阅读', 'reviewer', '匿名阅读实际候选并封存反馈、输入版本及隔离限制；不预先选声或采用。'),
     'draft': ('正文起草', 'writer', '产出当前版本草稿及候选变化。'),
     'first_read': ('独立首次阅读', 'reviewer', '先读正文并保存未受预期答案引导的阅读反馈。'),
     'review': ('文学与连贯性评审', 'reviewer', '提供当前稿的具体证据、问题机制及处理建议。'),
@@ -93,6 +115,13 @@ TASK_DEFAULTS = {
     'finalize': ('全书定稿验收', 'materials', '核验完整清单、独立阅读和修订证据。'),
 }
 EDITORIAL_CHECKS = {
+    'outline_draft': ('outline_candidate',),
+    'outline_review': ('outline_review',),
+    'outline_revision_1': ('outline_candidate', 'issue_disposition'),
+    'outline_revision_2': ('outline_candidate', 'issue_disposition'),
+    'outline_recheck_1': ('outline_review',),
+    'outline_recheck_2': ('outline_review',),
+    'outline_acceptance': ('current_version', 'author_confirmation'),
     'scope': ('authorization', 'source_status'),
     'organize': ('source_status', 'handoff'),
     'read_only_review': ('reader_experience', 'editorial_findings'),
@@ -117,10 +146,11 @@ DIRECTION_DECISIONS = {
     'authorization': ('collaboration', 'work_scope'),
 }
 DECISION_RESOLUTIONS = {'provided', 'selected', 'delegated', 'unresolved'}
-MANAGEMENT_TASK_KINDS = {'storyline_management', 'hook_management', 'curve_direction'}
+MANAGEMENT_TASK_KINDS = {'storyline_management', 'hook_management', 'curve_direction', 'hidden_plot_management'}
 ROLE_REVIEW_TASK_KINDS = {'role_materials', 'role_perspective', 'role_editorial'}
 VOICE_REVIEW_TASK_KINDS = {'voice_first_read', 'voice_selection'}
 CREATIVE_DECISION_TASKS = {'concept', 'prepare', 'revise', 'next_plan', 'structural_revision', 'voice_selection', 'organize'} | MANAGEMENT_TASK_KINDS
+CREATIVE_DECISION_TASKS |= {'outline_draft', 'outline_revision_1', 'outline_revision_2'}
 TITLE_PRIOR_STATUSES = {'proposed', 'active', 'retired', 'rejected', 'unknown'}
 RECOVERY_CLASSES = {'author_input', 'held_output', 'excluded'}
 
@@ -132,6 +162,17 @@ def require(condition, message):
 
 def nonempty(value):
     return isinstance(value, str) and bool(value.strip())
+
+
+def task_cursor(stage):
+    if stage['workflow'] == 'outline':
+        return of.cursor(stage)
+    return next((task['id'] for task in stage['tasks'] if task['status'] not in FINISHED), '')
+
+
+def dependency_errors(root, stage, task, dependency, task_map, valid):
+    special = of.submitted_dependency_errors(root, stage, task, task_map[dependency][1], valid)
+    return valid(dependency) if special is None else special
 
 
 @contextmanager
@@ -157,7 +198,8 @@ def managed(data):
              '当前任务：' + (data['current_task'] or '本阶段任务已验收'), '', '## 阶段与子任务']
     for stage in data['stages']:
         label = str(stage['title']).replace('\n', ' ')
-        lines.append('- [' + ('x' if stage['status'] == 'done' else ' ') + '] ' + stage['id'] + ' ' + label)
+        lines.append('- [' + ('x' if stage['status'] == 'done' else ' ') + '] ' + stage['id'] + ' ' + label
+                     + (' (superseded：已按作者决定改范围，未通过)' if stage['status'] == 'superseded' else ''))
         for task in stage['tasks']:
             title = str(task['title']).replace('\n', ' ')
             reason = '：' + task['reason'].replace('\n', ' ') if task['status'] == 'not_applicable' else ''
@@ -293,6 +335,14 @@ def decision_errors(decision, topic, strict=False, expected_title=None):
     return errors
 
 
+def hidden_plot_decision_errors(decision):
+    """Validate an optional feature choice, never infer it from author prose."""
+    errors = decision_errors(decision, 'author_preferences.hidden_plot', strict=True)
+    if isinstance(decision, dict) and decision.get('value') not in ('enabled', 'disabled'):
+        errors.append('hidden_plot decision value must be enabled or disabled')
+    return errors
+
+
 def title_decision_errors(title, decision, *, work_id=None):
     """Pure pre-init/title-change gate; quotes are assertions, not authentication."""
     if isinstance(decision, dict) and decision.get('resolution') == 'deferred':
@@ -327,6 +377,10 @@ def direction_errors(stage, task, root=None):
     if strict:
         preferences = checks.get('author_preferences', {}).get('decisions', {})
         decisions.append(('author_preferences.title', preferences.get('title') if isinstance(preferences, dict) else None))
+    if stage.get('hidden_plot_gate_version') == 1:
+        preferences = checks.get('author_preferences', {}).get('decisions', {})
+        decision = preferences.get('hidden_plot') if isinstance(preferences, dict) else None
+        errors.extend(hidden_plot_decision_errors(decision))
     for topic, decision in decisions:
         if topic == 'author_preferences.title' and root is not None:
             state = nc.load_state(root)
@@ -337,8 +391,17 @@ def direction_errors(stage, task, root=None):
     return errors
 
 
+def requires_creative_decisions(stage, task):
+    # A newly introduced optional specialist always needs its enabling choice,
+    # including when it is added to a historical compatibility stage.
+    if task['kind'].startswith('outline_') and stage['workflow'] != 'outline':
+        return False  # Do not reinterpret historical hand-built planning tasks.
+    return (task['kind'] == 'hidden_plot_management' or
+            stage.get('decision_gate_version') == 1 and task['kind'] in CREATIVE_DECISION_TASKS)
+
+
 def creative_decision_errors(root, stage, task):
-    if stage.get('decision_gate_version') != 1 or task['kind'] not in CREATIVE_DECISION_TASKS:
+    if not requires_creative_decisions(stage, task):
         return []
     check = task.get('checks', {}).get('creative_decisions')
     if not isinstance(check, dict):
@@ -347,8 +410,19 @@ def creative_decision_errors(root, stage, task):
     if not isinstance(items, list):
         return ['creative_decisions requires an items list']
     if not items:
-        return [] if nonempty(check.get('none_reason')) else ['no new decisions requires none_reason']
+        errors = [] if nonempty(check.get('none_reason')) else ['no new decisions requires none_reason']
+        if task['kind'] == 'hidden_plot_management':
+            errors.append('hidden_plot_management requires exactly one enabled hidden_plot decision')
+        return errors
     seen, errors = set(), []
+    if task['kind'] == 'hidden_plot_management':
+        enabling = [item for item in items if isinstance(item, dict) and item.get('topic') == 'hidden_plot']
+        if len(enabling) != 1:
+            errors.append('hidden_plot_management requires exactly one enabled hidden_plot decision')
+        else:
+            errors.extend(hidden_plot_decision_errors(enabling[0]))
+            if enabling[0].get('value') != 'enabled':
+                errors.append('hidden_plot_management requires an enabled hidden_plot decision')
     for item in items:
         if not isinstance(item, dict) or not all(nonempty(item.get(key)) for key in ('id', 'topic', 'record_id')):
             errors.append('creative decision requires id/topic/record_id')
@@ -363,7 +437,7 @@ def creative_decision_errors(root, stage, task):
 
 def decision_preflight_errors(root, stage, task):
     errors = creative_decision_errors(root, stage, task)
-    if stage.get('decision_gate_version') != 1 or task['kind'] not in CREATIVE_DECISION_TASKS:
+    if not requires_creative_decisions(stage, task):
         return errors
     check = task.get('checks', {}).get('creative_decisions')
     if not isinstance(check, dict):
@@ -380,13 +454,16 @@ def decision_preflight_errors(root, stage, task):
 
 def editorial_errors(root, stage, task):
     strict_direction = stage.get('direction_gate_version') == 1 and task['kind'] == 'direction'
-    if (workflow_version(stage) < 2 and not strict_direction) or task['status'] == 'not_applicable':
+    if ((workflow_version(stage) < 2 and not strict_direction and task['kind'] != 'hidden_plot_management')
+            or task['status'] == 'not_applicable'):
         return []
     checks = task.get('checks', {})
     errors = direction_errors(stage, task, root) + creative_decision_errors(root, stage, task)
     references = {item['path']: item['sha256'] for item in task['inputs'] + task['outputs']}
     required = list(EDITORIAL_CHECKS.get(task['kind'], ()))
-    if stage.get('decision_gate_version') == 1 and task['kind'] in CREATIVE_DECISION_TASKS:
+    if task['kind'].startswith('outline_') and stage['workflow'] != 'outline':
+        required = []
+    if requires_creative_decisions(stage, task):
         required.append('creative_decisions')
     for name in required:
         item = checks.get(name)
@@ -394,7 +471,7 @@ def editorial_errors(root, stage, task):
             errors.append('missing editorial check: ' + name)
         elif references.get(item['path']) != item['sha256']:
             errors.append('editorial check must reference task evidence: ' + name)
-    return errors
+    return errors + of.editorial_errors(root, stage, task)
 
 
 def structure(root, data):
@@ -411,6 +488,11 @@ def structure(root, data):
         if 'direction_gate_version' in stage:
             require(stage['workflow'] == 'planning' and type(stage['direction_gate_version']) is int
                     and stage['direction_gate_version'] == 1, 'invalid direction_gate_version (planning only, version 1)')
+        if 'hidden_plot_gate_version' in stage:
+            require(stage['workflow'] == 'planning' and workflow_version(stage) == 2
+                    and stage.get('direction_gate_version') == 1
+                    and type(stage['hidden_plot_gate_version']) is int and stage['hidden_plot_gate_version'] == 1,
+                    'invalid hidden_plot_gate_version (v2 planning with author direction gate only, version 1)')
         if 'decision_gate_version' in stage:
             require(workflow_version(stage) == 2 and type(stage['decision_gate_version']) is int
                     and stage['decision_gate_version'] == 1, 'invalid decision_gate_version (workflow v2 only, version 1)')
@@ -423,10 +505,12 @@ def structure(root, data):
             require(workflow_version(stage) == 2 and type(stage['result_gate_version']) is int
                     and stage['result_gate_version'] == 1,
                     'invalid result_gate_version (workflow v2 only, version 1)')
-        require(stage.get('status') in ('planned', 'active', 'done'), 'invalid stage status')
+        require(stage.get('status') in {'planned', 'active'} | CLOSED_STAGES, 'invalid stage status')
         chapter = stage.get('chapter')
         require(chapter is None or type(chapter) is int and chapter > 0, 'invalid stage chapter')
-        require(stage['workflow'] not in ('chapter', 'trial') or chapter is not None, 'chapter workflow needs chapter number')
+        require(stage['workflow'] not in ('chapter', 'trial', 'trial_only') or chapter is not None, 'chapter workflow needs chapter number')
+        require(stage['workflow'] != 'trial_only' or workflow_version(stage) == 2,
+                'trial_only requires workflow v2')
         require(stage.get('next_stage') is None or nonempty(stage['next_stage']), 'invalid next_stage')
         require(isinstance(stage.get('end_reason'), str), 'invalid end_reason')
         tasks = stage.get('tasks')
@@ -440,6 +524,20 @@ def structure(root, data):
         require(positions == sorted(positions) and tasks[-1].get('kind') == 'next_plan', 'core task order/next_plan must remain fixed')
         for task in tasks:
             require(isinstance(task, dict) and all(nonempty(task.get(k)) for k in ('id', 'kind', 'title', 'role', 'acceptance')), 'invalid task identity/acceptance')
+            if stage['workflow'] in STANDALONE_WORKFLOWS | {'trial_only'}:
+                require(not task['kind'].startswith('outline_'),
+                        'standalone and trial_only workflows cannot include outline creation or acceptance')
+            if stage['workflow'] == 'trial_only':
+                require(task['kind'] not in ({'concept', 'voice_selection', 'draft', 'first_read',
+                                             'review', 'revise', 'recheck', 'adopt', 'sync',
+                                             'whole_read', 'structural_revision', 'whole_recheck', 'finalize'}
+                                            | ROLE_REVIEW_TASK_KINDS),
+                        'trial_only cannot include selection, chapter creation/adoption or finalization tasks')
+                for output_path, _ in output_artifact_pairs(task):
+                    parts = Path(output_path).parts
+                    require(len(parts) > 1, 'trial_only cannot output formal top-level text')
+                    require(parts[0] != '草稿与备选' or task['kind'] == 'voice_trial',
+                            'trial_only candidate drafts must belong to voice_trial')
             if stage['workflow'] in STANDALONE_WORKFLOWS:
                 require(task['kind'] not in ({'concept', 'prepare', 'voice_trial', 'draft', 'review',
                                              'revise', 'recheck', 'adopt', 'sync', 'whole_read',
@@ -475,17 +573,23 @@ def structure(root, data):
             deps = task.get('depends_on')
             require(isinstance(deps, list) and all(nonempty(dep) for dep in deps) and len(deps) == len(set(deps)), 'invalid task dependencies')
             require(isinstance(task.get('reason'), str) and isinstance(task.get('history'), list) and isinstance(task.get('operation_id'), str), 'invalid task history/reason/operation_id')
+            require(type(task.get('dependency_restart_required', False)) is bool,
+                    'invalid dependency_restart_required')
             verification = task.get('verification')
             require(verification is None or isinstance(verification, dict), 'invalid verification')
             evidence_structure(root, task.get('inputs'))
             evidence_structure(root, task.get('outputs'))
             check_structure(root, task)
         for previous, current in zip(positions, positions[1:]):
+            if stage['workflow'] == 'outline' and tasks[current]['kind'] == 'outline_acceptance':
+                continue  # Bounded rounds rebind this edge to the latest report.
             require(tasks[previous]['id'] in tasks[current]['depends_on'], 'core task missing required predecessor: ' + tasks[current]['kind'])
+        if stage['workflow'] == 'outline':
+            of.validate_structure(stage)
     require(data.get('current_stage') in stage_map, 'invalid current_stage')
     if any(stage.get('execution_gate_version') == 1 for stage in stages):
         current_position = next(i for i, stage in enumerate(stages) if stage['id'] == data['current_stage'])
-        require(all(stage['status'] == 'done' for stage in stages[:current_position]),
+        require(all(stage['status'] in CLOSED_STAGES for stage in stages[:current_position]),
                 'earlier stages must close before advancing the stage cursor')
         require(all(stage['status'] != 'active' for stage in stages[current_position + 1:]),
                 'future stages cannot be active')
@@ -493,12 +597,16 @@ def structure(root, data):
                     for stage in stages if stage['status'] == 'done'),
                 'closed stages cannot contain unaccepted tasks')
         current = stage_map[data['current_stage']]
-        expected_cursor = next((task['id'] for task in current['tasks'] if task['status'] not in FINISHED), '')
-        require(data.get('current_task') == expected_cursor, 'task cursor must match the first unaccepted task')
-    require(sum(stage['status'] != 'done' for stage in stages) <= 2, 'detail only the current and next stage')
+        expected_cursor = task_cursor(current)
+        require(data.get('current_task') == expected_cursor, 'task cursor must match the workflow resume task')
+    require(sum(stage['status'] not in CLOSED_STAGES for stage in stages) <= 2, 'detail only the current and next stage')
     require(data.get('current_task') == '' or data.get('current_task') in task_map and task_map[data['current_task']][0]['id'] == data['current_stage'], 'invalid current_task')
     for stage in stages:
         require(stage['next_stage'] is None or stage['next_stage'] in stage_map and stage['next_stage'] != stage['id'], 'next_stage must name another detailed stage')
+        if stage['status'] == 'superseded':
+            of.validate_supersession(root, stage, stage_map)
+        else:
+            require('outline_supersession' not in stage, 'outline supersession requires superseded status')
     for stage in stages:
         chain = set()
         cursor = stage
@@ -567,6 +675,8 @@ def new_stage(stage_id, title, workflow, chapter=None, next_stage=None, end_reas
     require(type(workflow_version) is int and workflow_version in (1, 2), 'unsupported workflow_version')
     require(workflow not in STANDALONE_WORKFLOWS or workflow_version == 2,
             'standalone workflows require workflow v2')
+    require(workflow != 'trial_only' or workflow_version == 2, 'trial_only requires workflow v2')
+    require(workflow != 'outline' or workflow_version == 2, 'outline requires workflow v2')
     tasks = []
     for kind in WORKFLOWS[workflow]:
         title_text, role, acceptance = TASK_DEFAULTS[kind]
@@ -579,6 +689,7 @@ def new_stage(stage_id, title, workflow, chapter=None, next_stage=None, end_reas
                  status='planned', next_stage=next_stage, end_reason=end_reason, tasks=tasks)
     if workflow == 'planning' and workflow_version == 2:
         stage['direction_gate_version'] = 1
+        stage['hidden_plot_gate_version'] = 1
     if workflow_version == 2:
         stage['decision_gate_version'] = 1
         stage['execution_gate_version'] = 1
@@ -599,6 +710,55 @@ def initialize(book, workflow_version=2, workflow='planning'):
         return dict(ok=True, path=TASK_FILE, current_stage='S01')
 
 
+def narrow_trial(root, data, stage, request):
+    """Close a candidate-only scope without pretending later creation occurred."""
+    require(stage['id'] == data['current_stage'] and stage['workflow'] == 'trial'
+            and stage['status'] != 'done' and workflow_version(stage) == 2,
+            'trial narrowing requires the current unclosed v2 trial')
+    verification = request.get('verification')
+    require(nonempty(request.get('reason')) and nonempty(request.get('end_reason'))
+            and isinstance(verification, dict)
+            and all(nonempty(verification.get(key)) for key in ('agent_id', 'source')),
+            'trial narrowing needs reason, end_reason and actual host verification')
+    require(not nc.load_state(root)['pending_operations'], 'pending_operations prevent trial narrowing')
+    _, task_map = structure(root, data)
+    valid = task_validity(root, data, task_map)
+    for kind in ('prepare', 'voice_trial', 'voice_first_read'):
+        task = selected_task(stage, kind)
+        errors = valid(task['id'])
+        require(task['status'] == 'done' and not errors,
+                'trial narrowing requires accepted current candidates and feedback: ' + kind)
+    removed_kinds = (set(WORKFLOWS['trial']) - set(WORKFLOWS['trial_only'])) | {'voice_selection'}
+    removed = [task for task in stage['tasks'] if task['kind'] in removed_kinds]
+    for task in removed:
+        require(task['status'] == 'todo' and not any(task.get(field) for field in
+                ('inputs', 'outputs', 'checks', 'verification', 'history', 'operation_id',
+                 'dependency_restart_required')),
+                'trial narrowing cannot discard started or recorded work: ' + task['id'])
+    retained = [task for task in stage['tasks'] if task['kind'] not in removed_kinds]
+    removed_ids = {task['id'] for task in removed}
+    for task in retained:
+        if task['kind'] != 'next_plan':
+            require(not removed_ids.intersection(task['depends_on']),
+                    'trial narrowing cannot discard a retained task dependency')
+    blockers = artifact_blockers(root, data, task_map)
+    require(not blockers, '; '.join(blockers))
+    previous = copy.deepcopy(stage)
+    following = selected_task(stage, 'next_plan')
+    require(following['status'] == 'todo', 'trial narrowing requires an unstarted next_plan')
+    archive(following, 'trial scope narrowed')
+    following.update(status='todo', inputs=[], outputs=[], checks={}, verification=None,
+                     operation_id='', reason='',
+                     depends_on=[task['id'] for task in retained if task is not following])
+    following.pop('dependency_restart_required', None)
+    stage['tasks'] = retained
+    stage['workflow'] = 'trial_only'
+    stage['next_stage'] = request.get('next_stage')
+    stage.setdefault('workflow_history', []).append(dict(reason=request['reason'],
+        verification=copy.deepcopy(verification), stage=previous))
+    data['current_task'] = next((task['id'] for task in retained if task['status'] not in FINISHED), '')
+
+
 def plan(book, request):
     require(isinstance(request, dict), 'plan request must be an object')
     with writing(book) as root:
@@ -607,31 +767,34 @@ def plan(book, request):
         require(nonempty(stage_id), 'missing stage id')
         if stage_id in stages:
             stage = stages[stage_id]
-            require(stage['status'] != 'done', 'closed stages are historical; plan a new revision stage')
+            require(stage['status'] not in CLOSED_STAGES, 'closed stages are historical; plan a new revision stage')
             if request.get('workflow', stage['workflow']) != stage['workflow']:
-                # Route an untouched bootstrap only; started or historical work
-                # remains real pending work rather than being marked complete.
-                verification = request.get('verification')
-                require(stage['workflow'] == 'planning' and request['workflow'] in STANDALONE_WORKFLOWS
-                        and stage['id'] == 'S01' and len(data['stages']) == 1
-                        and stage['id'] == data['current_stage'] and stage['next_stage'] is None
-                        and not stage.get('workflow_history')
-                        and all(task['status'] == 'todo' and not any(task.get(field)
-                            for field in ('inputs', 'outputs', 'checks', 'verification', 'history', 'operation_id'))
-                            for task in stage['tasks']),
-                        'only an untouched initial planning stage can route to a standalone workflow')
-                require(nonempty(request.get('reason')) and isinstance(verification, dict)
-                        and all(nonempty(verification.get(key)) for key in ('agent_id', 'source')),
-                        'standalone routing needs a reason and actual host verification')
-                previous = copy.deepcopy(stage)
-                replacement = new_stage(stage['id'], request.get('title', TASK_DEFAULTS['scope'][0]),
-                                        request['workflow'], workflow_version=2)
-                replacement['status'] = stage['status']
-                replacement['workflow_history'] = [dict(reason=request['reason'],
-                    verification=copy.deepcopy(verification), stage=previous)]
-                data['stages'][data['stages'].index(stage)] = replacement
-                stages[stage_id] = stage = replacement
-                data['current_task'] = stage['tasks'][0]['id']
+                # Only pristine bootstrap routing or an explicitly verified
+                # candidate-only trial narrowing may change the workflow.
+                if stage['workflow'] == 'trial' and request['workflow'] == 'trial_only':
+                    narrow_trial(root, data, stage, request)
+                else:
+                    verification = request.get('verification')
+                    require(stage['workflow'] == 'planning' and request['workflow'] in STANDALONE_WORKFLOWS
+                            and stage['id'] == 'S01' and len(data['stages']) == 1
+                            and stage['id'] == data['current_stage'] and stage['next_stage'] is None
+                            and not stage.get('workflow_history')
+                            and all(task['status'] == 'todo' and not any(task.get(field)
+                                for field in ('inputs', 'outputs', 'checks', 'verification', 'history', 'operation_id'))
+                                for task in stage['tasks']),
+                            'only an untouched initial planning stage can route to a standalone workflow')
+                    require(nonempty(request.get('reason')) and isinstance(verification, dict)
+                            and all(nonempty(verification.get(key)) for key in ('agent_id', 'source')),
+                            'standalone routing needs a reason and actual host verification')
+                    previous = copy.deepcopy(stage)
+                    replacement = new_stage(stage['id'], request.get('title', TASK_DEFAULTS['scope'][0]),
+                                            request['workflow'], workflow_version=2)
+                    replacement['status'] = stage['status']
+                    replacement['workflow_history'] = [dict(reason=request['reason'],
+                        verification=copy.deepcopy(verification), stage=previous)]
+                    data['stages'][data['stages'].index(stage)] = replacement
+                    stages[stage_id] = stage = replacement
+                    data['current_task'] = stage['tasks'][0]['id']
             for field in ('workflow', 'chapter'):
                 require(field not in request or request[field] == stage[field], 'cannot change existing ' + field)
             require('workflow_version' not in request or request['workflow_version'] == workflow_version(stage),
@@ -662,7 +825,7 @@ def plan(book, request):
                 if field in request:
                     stage[field] = request[field]
         else:
-            require(sum(stage['status'] != 'done' for stage in data['stages']) < 2, 'detail only the current and next stage')
+            require(sum(stage['status'] not in CLOSED_STAGES for stage in data['stages']) < 2, 'detail only the current and next stage')
             if request.get('workflow_version', 2) == 1:
                 require(nonempty(request.get('compatibility_reason')),
                         'new legacy stage requires compatibility_reason; new work uses workflow v2')
@@ -693,14 +856,60 @@ def plan(book, request):
                 stage['direction_gate_version'] = 1
                 if stage_id == data['current_stage']:
                     data['current_task'] = direction['id']
+        if 'hidden_plot_gate_version' in request:
+            require(type(request['hidden_plot_gate_version']) is int and request['hidden_plot_gate_version'] == 1,
+                    'hidden plot gate cannot be downgraded')
+            require(stage['workflow'] == 'planning' and workflow_version(stage) == 2
+                    and stage.get('direction_gate_version') == 1,
+                    'hidden plot gate requires v2 planning with the author direction gate')
+            if stage.get('hidden_plot_gate_version') != 1:
+                direction = selected_task(stage, 'direction')
+                require(stage_id == data['current_stage'] and direction['status'] not in FINISHED,
+                        'upgrade only the current unaccepted direction; accepted direction is historical')
+                archive(direction, 'hidden plot gate upgraded before acceptance')
+                stage['hidden_plot_gate_version'] = 1
+                data['current_task'] = next(item['id'] for item in stage['tasks'] if item['status'] not in FINISHED)
         if stage['next_stage']:
             successor = next((item for item in data['stages'] if item['id'] == stage['next_stage']), None)
-            require(successor is not None and successor['status'] != 'done', 'next_stage must be an unfinished future stage')
-        if stages[data['current_stage']]['status'] == 'done' and stage['status'] == 'planned':
+            require(successor is not None and successor['status'] not in CLOSED_STAGES, 'next_stage must be an unfinished future stage')
+        if stages[data['current_stage']]['status'] in CLOSED_STAGES and stage['status'] == 'planned':
             data['current_stage'] = stage_id
             data['current_task'] = stage['tasks'][0]['id']
         save(root, data)
         return dict(ok=True, stage=stage_id)
+
+
+def historical_adopt_outputs(root, stage, task):
+    """Resolve only a closed adoption's installed bytes through its fixed archive.
+
+    Authorized renaming/reordering and later chapter revisions leave the original
+    adoption intact. Other evidence still belongs to its declared file path.
+    A live chapter that still cites this operation must itself remain intact.
+    """
+    if (stage['status'] != 'done' or stage['workflow'] not in ('chapter', 'trial')
+            or task['kind'] != 'adopt' or task['status'] != 'done'
+            or not verified_history(task) or not nonempty(task['operation_id'])):
+        return set()
+    try:
+        from chapterctl import validate_sync_receipt
+        receipt = validate_sync_receipt(root, task['operation_id'])
+        require(receipt.get('task_stage') == stage['id']
+                and receipt.get('number') == stage['chapter'],
+                'historical adoption does not belong to this stage/chapter')
+        pair = receipt['target'], receipt['draft_sha256']
+        require(pair in {(item['path'], item['sha256']) for item in task['outputs']},
+                'historical adoption output differs from its archive')
+        state = nc.load_state(root)
+        for chapter in state['chapters']:
+            if chapter.get('adoption_operation_id') != task['operation_id']:
+                continue
+            path = nc.relative_path(root, chapter['path'])
+            require(chapter['sha256'] == pair[1] and path.is_file()
+                    and nc.digest(path) == pair[1],
+                    'current chapter no longer matches its adoption operation')
+        return {pair}
+    except (ValueError, OSError, TypeError, KeyError, AttributeError):
+        return set()
 
 
 def task_validity(root, data, task_map):
@@ -713,6 +922,8 @@ def task_validity(root, data, task_map):
         if task['status'] not in FINISHED:
             errors.append('not accepted')
         else:
+            if task.get('dependency_restart_required'):
+                errors.append('dependency changed; restart task with current inputs before submission or acceptance')
             errors.extend(editorial_errors(root, stage, task))
             errors.extend(terminal_result_errors(root, stage, task))
             verification = task['verification']
@@ -728,12 +939,20 @@ def task_validity(root, data, task_map):
                 successor = next(item for item in data['stages'] if item['id'] == stage['next_stage'])
                 if successor['status'] == 'done':
                     errors.append('next_stage must be an unfinished future stage')
-            for item in task['inputs'] + task['outputs']:
+            for item in task['inputs']:
                 path = nc.relative_path(root, item['path'])
                 if not path.is_file() or nc.digest(path) != item['sha256']:
                     errors.append('stale evidence: ' + item['path'])
+            archived_outputs = None
+            for item in task['outputs']:
+                path = nc.relative_path(root, item['path'])
+                if not path.is_file() or nc.digest(path) != item['sha256']:
+                    if archived_outputs is None:
+                        archived_outputs = historical_adopt_outputs(root, stage, task)
+                    if (item['path'], item['sha256']) not in archived_outputs:
+                        errors.append('stale evidence: ' + item['path'])
             for dependency in task['depends_on']:
-                if valid(dependency):
+                if dependency_errors(root, stage, task, dependency, task_map, valid):
                     errors.append('invalid dependency: ' + dependency)
         memo[task_id] = errors
         return errors
@@ -837,13 +1056,35 @@ def execution_input_errors(root, task):
     return errors
 
 
-def pending_execution_errors(root, stage, task, task_map):
+def pending_execution_errors(root, stage, task, task_map, *, resume_operation=None):
     """During adoption, only its administrative/synchronization chain can run.
 
     Recovery records are handled separately by recover/recovery_only. Specialists
     must be both after adopt and before sync; a matching kind alone is insufficient.
+    resume_operation is a private recovery allowance for the original doing adopt
+    task. Ordinary CLI gates never pass it and retain their normal pending block.
     """
     pending = nc.load_state(root)['pending_operations']
+    if resume_operation is not None:
+        blocked = ['adoption resume requires its original pending operation and doing adopt task']
+        if not nonempty(resume_operation) or len(pending) != 1:
+            return blocked
+        operation = pending[0]
+        request = operation.get('request', {})
+        if (not isinstance(request, dict)
+                or operation.get('operation_id') != resume_operation
+                or operation.get('kind') != 'chapter_adopt'
+                or operation.get('phase') not in ('prepared', 'adopted')
+                or stage['workflow'] not in ('chapter', 'trial')
+                or stage['status'] in CLOSED_STAGES
+                or operation.get('task_stage') != stage['id']
+                or request.get('task_stage') != stage['id']
+                or stage['chapter'] != operation.get('number')
+                or request.get('number') != stage['chapter']
+                or task['id'] != selected_task(stage, 'adopt')['id']
+                or task['status'] != 'doing'):
+            return blocked
+        return []
     if not pending:
         return []
     blocked = ['pending_operations require recovery or current adoption synchronization before new work']
@@ -880,7 +1121,7 @@ def update(book, request):
     with writing(book) as root:
         data, (stages, task_map) = load(root)
         stage = stages.get(request.get('stage'))
-        require(stage is not None and stage['id'] == data['current_stage'] and stage['status'] != 'done', 'only the current unclosed stage can execute')
+        require(stage is not None and stage['id'] == data['current_stage'] and stage['status'] not in CLOSED_STAGES, 'only the current unclosed stage can execute')
         task = selected_task(stage, request.get('task'))
         status = request.get('status')
         require(status in STATUSES, 'invalid task status')
@@ -895,6 +1136,14 @@ def update(book, request):
         require(type(recovery_only) is bool, 'recovery_only must be a boolean')
         require(not recovery_only or enforced, 'recovery_only requires an explicit execution gate upgrade')
         before_status = task['status']
+        outline_errors = of.mutation_errors(stage, task, request)
+        require(not outline_errors, '; '.join(outline_errors))
+        restart_required = task.get('dependency_restart_required', False)
+        if restart_required and status in ('submitted', 'done', 'not_applicable'):
+            require(False, 'dependency changed; restart task with current inputs before submission or acceptance')
+        if restart_required and status == 'doing':
+            require('inputs' in request and nonempty(request.get('reason')),
+                    'dependency restart requires explicit current inputs and reason')
         before_outputs = set(output_artifact_pairs(task))
         requested_outputs = request.get('outputs', task['outputs'])
         if status in ('submitted', 'done') and 'outputs' in request:
@@ -929,11 +1178,14 @@ def update(book, request):
         if task['kind'] == 'sync' and status == 'done':
             require(not nc.load_state(root)['pending_operations'], 'pending_operations must be cleared before accepting sync')
         if status in ('doing', 'submitted', 'done', 'not_applicable'):
+            outline_errors = of.execution_errors(stage, task)
+            require(not outline_errors, '; '.join(outline_errors))
             if not recovery_only:
                 pending_errors = pending_execution_errors(root, stage, task, task_map)
                 require(not pending_errors, '; '.join(pending_errors))
             valid = task_validity(root, data, task_map)
-            require(all(not valid(dep) for dep in task['depends_on']), 'task prerequisites are incomplete or stale')
+            require(all(not dependency_errors(root, stage, task, dep, task_map, valid)
+                        for dep in task['depends_on']), 'task prerequisites are incomplete or stale')
         changed_acceptance = task['status'] in FINISHED and status in FINISHED and any(
             field in request and request[field] != task.get(field, {})
             for field in ('inputs', 'outputs', 'checks', 'reason', 'operation_id'))
@@ -947,6 +1199,15 @@ def update(book, request):
             if field in request:
                 task[field] = copy.deepcopy(request[field])
         task['status'] = status
+        if stage['workflow'] == 'outline' and task['kind'] == 'outline_acceptance' and status == 'done':
+            # Seal the original production record only as part of final acceptance.
+            # Its output remains v1; current_version identifies the selected version.
+            draft = selected_task(stage, 'outline_draft')
+            if draft['status'] == 'submitted':
+                archive(draft, 'sealed by final outline acceptance')
+                draft.update(status='done', verification=copy.deepcopy(task['verification']))
+        if restart_required and status == 'doing':
+            task.pop('dependency_restart_required', None)
         if reopened or changed_acceptance:
             if reopened:
                 task['verification'] = None
@@ -958,20 +1219,32 @@ def update(book, request):
                     if downstream['id'] not in affected and affected.intersection(downstream['depends_on']):
                         affected.add(downstream['id'])
                         changed = True
-                        if downstream['status'] in FINISHED:
+                        executed = FINISHED | {'doing', 'submitted'}
+                        if any(isinstance(record, dict) and record.get('status') in executed
+                               for record in [downstream] + downstream['history']):
                             archive(downstream, 'reopened dependency')
-                            downstream['status'] = 'todo'
-                            downstream['verification'] = None
-        data['current_task'] = next((item['id'] for item in stage['tasks'] if item['status'] not in FINISHED), '')
+                            record = downstream['history'][-1]
+                            record['dependency_invalidated_by'] = task['id']
+                            # Retain only bytes actually registered and present
+                            # now. Prior acceptance proves their provenance, never
+                            # permission to reuse a result after its inputs change.
+                            record['retained_outputs'] = [dict(path=path, sha256=sha)
+                                for path, sha in output_artifact_pairs(downstream)
+                                if nc.relative_path(root, path).is_file()
+                                and nc.digest(nc.relative_path(root, path)) == sha]
+                            downstream.update(status='todo', inputs=[], outputs=[], checks={},
+                                              operation_id='', verification=None, reason='',
+                                              dependency_restart_required=True)
+        data['current_task'] = task_cursor(stage)
         structure(root, data)
+        if status == 'doing' and (enforced or task['kind'] == 'hidden_plot_management'):
+            errors = decision_preflight_errors(root, stage, task)
+            require(not errors, '; '.join(errors))
+            for item in task['inputs'] + task['outputs']:
+                path = nc.relative_path(root, item['path'])
+                require(path.is_file() and nc.digest(path) == item['sha256'],
+                        'stale execution evidence: ' + item['path'])
         if enforced and status in ('doing', 'submitted', 'done', 'not_applicable'):
-            if status == 'doing':
-                errors = decision_preflight_errors(root, stage, task)
-                require(not errors, '; '.join(errors))
-                for item in task['inputs'] + task['outputs']:
-                    path = nc.relative_path(root, item['path'])
-                    require(path.is_file() and nc.digest(path) == item['sha256'],
-                            'stale execution evidence: ' + item['path'])
             blockers = artifact_blockers(root, data, task_map)
             require(recovery_only or not blockers, '; '.join(blockers))
         if status == 'submitted':
@@ -986,9 +1259,11 @@ def update(book, request):
             errors = task_validity(root, data, task_map)(task['id'])
             require(not errors, 'task cannot be accepted: ' + '; '.join(errors))
         stage['status'] = 'active'
-        data['current_task'] = next((item['id'] for item in stage['tasks'] if item['status'] not in FINISHED), '')
+        data['current_task'] = task_cursor(stage)
         save(root, data)
         result = dict(ok=True, stage=stage['id'], task=task['id'], status=status)
+        if stage['workflow'] == 'outline':
+            result.update(of.next_action(stage))
         if recovery_only:
             result['recovery_only'] = True
         return result
@@ -1000,11 +1275,20 @@ def submit(book, request):
     return update(book, dict(request, status='submitted'))
 
 
+def outline_revise(book, request):
+    return of.revise(book, request)
+
+
+def outline_rescope(book, request):
+    return of.rescope(book, request)
+
+
 def artifact_candidates(root):
     """Inventory story artifacts, including live records outside draft folders.
 
     Agreement/state infrastructure and immutable history have their own checks.
     Only byte-identical initialization skeletons are exempt story records.
+    Reference sources include binary attachments, not only readable notes.
     """
     result = []
     files, _ = nc.inventory(root, exclude_history=True)
@@ -1013,12 +1297,14 @@ def artifact_candidates(root):
         if (len(path.parts) < 2 or path.parts[0] == '创作约定'
                 or path.name == '索引.md'):
             continue
-        skeleton = nc.MANAGEMENT_FILES.get(name)
+        skeleton = (nc.HIDDEN_PLOT_TEMPLATE if name == nc.HIDDEN_PLOT_FILE
+                    else nc.MANAGEMENT_FILES.get(name))
         if skeleton is not None:
             import hashlib
             if sha == hashlib.sha256(skeleton.encode('utf-8')).hexdigest():
                 continue
-        if (path.suffix.lower() in ('.md', '.txt', '.json') or
+        if (path.parts[0] == '参考资料' or
+                path.suffix.lower() in ('.md', '.txt', '.json') or
                 re.search(r'第\d+章.*(?:草稿|首读|评审|复核|修订)', path.name)):
             result.append((name, sha))
     return result
@@ -1122,7 +1408,7 @@ def artifact_owner_matches(path, stage, task):
     if path.startswith('草稿与备选/') and chapter:
         if task['kind'] == 'structural_revision' and stage['workflow'] == 'finalization':
             return True
-        return (stage['workflow'] in ('chapter', 'trial')
+        return (stage['workflow'] in ('chapter', 'trial', 'trial_only')
                 and task['kind'] in ('voice_trial', 'draft', 'revise')
                 and (not chapter.group(1).isdigit() or int(chapter.group(1)) == stage['chapter']))
     return True
@@ -1182,6 +1468,37 @@ def historical_sync_artifact_pairs(root, data):
     return pairs
 
 
+def retained_dependency_outputs(data):
+    """Keep exact invalidated execution bytes without approving their reuse.
+
+    Only automatic dependency invalidation records qualify. Retention itself
+    grants no known_artifact_pairs provenance; prior acceptance can independently
+    prove provenance, but the restart marker still prevents restoring progress.
+    """
+    pairs = set()
+    for stage in data['stages']:
+        tasks = {task['id']: task for task in stage['tasks']}
+        for task in stage['tasks']:
+            ancestors, remaining = set(), list(task['depends_on'])
+            while remaining:
+                task_id = remaining.pop()
+                if task_id not in ancestors:
+                    ancestors.add(task_id)
+                    remaining.extend(tasks[task_id]['depends_on'])
+            for record in task['history']:
+                if (not isinstance(record, dict) or record.get('action') != 'reopened dependency'
+                        or record.get('status') not in STATUSES
+                        or record.get('id') != task['id'] or record.get('kind') != task['kind']
+                        or record.get('dependency_invalidated_by') not in ancestors):
+                    continue
+                declared = set(output_artifact_pairs(record))
+                for item in record.get('retained_outputs', []):
+                    pair = item.get('path'), item.get('sha256')
+                    if pair in declared:
+                        pairs.add(pair)
+    return pairs
+
+
 def artifact_blockers(root, data, task_map=None, *, recovery_successor=None):
     """Find unaccounted output; a declared successor can receive held recovery.
 
@@ -1192,8 +1509,16 @@ def artifact_blockers(root, data, task_map=None, *, recovery_successor=None):
         _, task_map = structure(root, data)
     valid = task_validity(root, data, task_map)
     recoveries = recovery_index(data)
-    current, historical = {}, set()
+    current, historical = {}, retained_dependency_outputs(data)
     for stage in data['stages']:
+        if stage['status'] == 'superseded':
+            historical.update((item['path'], item['sha256'])
+                              for item in stage['outline_supersession']['artifacts'])
+            # Sealed task declarations also retain provenance for their then-live
+            # material_files. Later registered updates may change those files;
+            # only immutable inputs/outputs remain permanently hash-bound.
+            for task in stage['tasks']:
+                historical.update(output_artifact_pairs(task))
         for task in stage['tasks']:
             for pair in output_artifact_pairs(task):
                 current.setdefault(pair, []).append((stage, task))
@@ -1221,7 +1546,7 @@ def artifact_blockers(root, data, task_map=None, *, recovery_successor=None):
             if record['classification'] == 'excluded':
                 if any(pair in set(output_artifact_pairs(task)) |
                        {(item['path'], item['sha256']) for item in task['inputs']}
-                       for stage, task in task_map.values() if stage['status'] != 'done'):
+                       for stage, task in task_map.values() if stage['status'] not in CLOSED_STAGES):
                     blockers.append('excluded artifact cannot be active task evidence: ' + path)
                 continue
         owners = current.get(pair, [])
@@ -1229,7 +1554,8 @@ def artifact_blockers(root, data, task_map=None, *, recovery_successor=None):
                  if task['status'] in ('doing', 'submitted', 'done', 'not_applicable')
                  and artifact_owner_matches(path, stage, task)
                  and (stage['id'] == data['current_stage'] or stage['status'] == 'done')
-                 and all(not valid(dep) for dep in task['depends_on'])]
+                 and all(not dependency_errors(root, stage, task, dep, task_map, valid)
+                         for dep in task['depends_on'])]
         if record and record['sha256'] == sha and record['classification'] == 'held_output':
             owner_stage, owner_task = task_map[record['task_id']]
             if (recovery_successor is not None and owner_stage['id'] == recovery_successor
@@ -1336,8 +1662,10 @@ def check(book, stage=None):
             require(selected is not None, 'unknown stage')
             valid = task_validity(root, data, task_map)
             for task in selected['tasks']:
-                errors = valid(task['id']) if task['status'] in FINISHED else [dep + ': invalid dependency' for dep in task['depends_on'] if valid(dep)] if task['status'] in ('doing', 'submitted') else []
+                errors = valid(task['id']) if task['status'] in FINISHED else [dep + ': invalid dependency' for dep in task['depends_on'] if dependency_errors(root, selected, task, dep, task_map, valid)] if task['status'] in ('doing', 'submitted') else []
                 if selected.get('execution_gate_version') == 1:
+                    if task.get('dependency_restart_required') and task['status'] in ('doing', 'submitted'):
+                        errors.append('dependency changed; restart task with current inputs before submission or acceptance')
                     if task['status'] == 'doing':
                         errors.extend(pending_execution_errors(root, selected, task, task_map))
                         errors.extend(decision_preflight_errors(root, selected, task))
@@ -1362,7 +1690,7 @@ def check(book, stage=None):
             if selected['status'] == 'done' and any(task['status'] not in FINISHED for task in selected['tasks']):
                 issues.append('closed stage has unaccepted tasks')
             current = stages[data['current_stage']]
-            expected_cursor = next((task['id'] for task in current['tasks'] if task['status'] not in FINISHED), '')
+            expected_cursor = task_cursor(current)
             if data['current_task'] != expected_cursor:
                 issues.append('task cursor differs from actual accepted/submitted tasks')
             blockers = artifact_blockers(root, data, task_map) if current.get('execution_gate_version') == 1 else []
@@ -1372,32 +1700,44 @@ def check(book, stage=None):
                           artifact_blockers=blockers,
                           resume=dict(stage=data['current_stage'], task=data['current_task'],
                                       note='Use this ledger cursor; inspect unregistered artifacts before repeating work.'))
+            if current['workflow'] == 'outline':
+                result['resume'].update(of.next_action(current))
         return result
     except (ValueError, OSError, TypeError, KeyError, AttributeError) as exc:
         return dict(ok=False, enabled=True, issues=[str(exc)], stale_tasks=stale)
 
 
-def _gate_details(book, stage, before, *, exact_task=False):
+def _gate_details(book, stage, before, *, exact_task=False, resume_operation=None):
     with reading(book) as root:
         data, (stages, task_map) = load(root)
         selected = stages.get(stage)
         require(selected is not None, 'unknown stage')
+        require(selected['status'] != 'superseded', 'superseded outlines cannot execute')
         require(selected['id'] == data['current_stage'] or selected['status'] == 'done', 'future stage cannot execute before current stage closes')
+        require(resume_operation is None or selected['id'] == data['current_stage']
+                and selected['status'] not in CLOSED_STAGES,
+                'only the current unclosed stage can resume adoption')
         task = selected_task(selected, before)
         require(not exact_task or task['id'] == before, 'reference gate needs an exact task id')
+        require(not task.get('dependency_restart_required')
+                or task['status'] not in ('doing', 'submitted', 'done', 'not_applicable'),
+                'dependency changed; restart task with current inputs before submission or acceptance')
         valid = task_validity(root, data, task_map)
         for dependency in task['depends_on']:
-            errors = valid(dependency)
+            errors = dependency_errors(root, selected, task, dependency, task_map, valid)
             require(not errors, dependency + ': ' + '; '.join(errors))
         if selected.get('execution_gate_version') == 1:
             blockers = artifact_blockers(root, data, task_map)
             require(not blockers, '; '.join(blockers))
-        pending_errors = pending_execution_errors(root, selected, task, task_map)
+        pending_errors = pending_execution_errors(root, selected, task, task_map,
+                                                  resume_operation=resume_operation)
         require(not pending_errors, '; '.join(pending_errors))
         decision_errors = decision_preflight_errors(root, selected, task)
         require(not decision_errors, '; '.join(decision_errors))
         input_errors = execution_input_errors(root, task)
         require(not input_errors, '; '.join(input_errors))
+        outline_errors = of.execution_errors(selected, task)
+        require(not outline_errors, '; '.join(outline_errors))
         return dict(ok=True, stage=stage, before=task['kind'])
 
 
@@ -1472,14 +1812,15 @@ def defer(book, request):
                 errors = valid(task['id'])
                 require(not errors, 'defer needs valid accepted evidence: ' + task['id'] + ': ' + '; '.join(errors))
         require(not any(task['status'] in ('doing', 'submitted')
-                        for item in data['stages'] for task in item['tasks']),
+                        for item in data['stages'] if item['status'] not in CLOSED_STAGES
+                        for task in item['tasks']),
                 'doing/submitted tasks must settle before deferral')
         blockers = artifact_blockers(root, data, task_map)
         require(not blockers, '; '.join(blockers))
         position = data['stages'].index(stage)
-        require(all(item['status'] == 'done' for item in data['stages'][:position]),
+        require(all(item['status'] in CLOSED_STAGES for item in data['stages'][:position]),
                 'earlier stages must close before deferral')
-        others = [item for item in data['stages'] if item is not stage and item['status'] != 'done']
+        others = [item for item in data['stages'] if item is not stage and item['status'] not in CLOSED_STAGES]
         require(not others or (len(others) == 1 and others[0]['id'] == revision['id']),
                 'another planned stage prevents deferral; preserve its plan')
         require(stage['next_stage'] in (None, revision['id']),
@@ -1526,7 +1867,7 @@ def close_stage(book, stage):
     with writing(book) as root:
         data, (stages, task_map) = load(root)
         selected = stages.get(stage)
-        require(selected is not None and stage == data['current_stage'] and selected['status'] != 'done', 'only the current unclosed stage can close')
+        require(selected is not None and stage == data['current_stage'] and selected['status'] not in CLOSED_STAGES, 'only the current unclosed stage can close')
         valid = task_validity(root, data, task_map)
         for task in selected['tasks']:
             errors = valid(task['id'])
@@ -1538,7 +1879,7 @@ def close_stage(book, stage):
         selected['status'] = 'done'
         if selected['next_stage']:
             data['current_stage'] = selected['next_stage']
-            data['current_task'] = next((task['id'] for task in stages[selected['next_stage']]['tasks'] if task['status'] not in FINISHED), '')
+            data['current_task'] = task_cursor(stages[selected['next_stage']])
         else:
             data['current_task'] = ''
         save(root, data)
@@ -1548,7 +1889,7 @@ def close_stage(book, stage):
 def choose_stage(data, explicit, workflows, chapter=None, allow_done=False):
     matches = [stage for stage in data['stages'] if stage['workflow'] in workflows and
                (chapter is None or stage['chapter'] == chapter) and
-               (allow_done or stage['status'] != 'done')]
+               (allow_done or stage['status'] not in CLOSED_STAGES)]
     if explicit is not None:
         matches = [stage for stage in matches if stage['id'] == explicit]
     elif allow_done:
@@ -1563,13 +1904,25 @@ def evidence_covers(evidence, expected):
     return all(indexed.get(path) == sha for path, sha in expected.items())
 
 
-def require_adoption(book, request):
+def require_adoption(book, request, *, resume_operation=None):
+    """Validate adoption, with private pending recovery only for the same operation.
+
+    chapterctl's recovery first validates the archive and prior/live installation.
+    Ordinary CLI gate calls cannot activate this exception.
+    """
     with reading(book) as root:
         if not enabled(root):
             return None
         data, _ = load(root)
         stage = choose_stage(data, request.get('task_stage'), ('chapter', 'trial'), request.get('number'))
-        gate(root, stage['id'], 'adopt')
+        if resume_operation is None:
+            gate(root, stage['id'], 'adopt')
+        else:
+            pending = nc.load_state(root)['pending_operations']
+            require(len(pending) == 1 and pending[0].get('operation_id') == resume_operation
+                    and pending[0].get('request') == request,
+                    'adoption resume requires the original pending request')
+            _gate_details(root, stage['id'], 'adopt', resume_operation=resume_operation)
         if stage.get('execution_gate_version') == 1:
             require(selected_task(stage, 'adopt')['status'] == 'doing',
                     'adopt task must be doing before chapter adoption')
@@ -1623,7 +1976,7 @@ def require_finalization(book, record):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     subs = parser.add_subparsers(dest='command', required=True)
-    for command in ('init', 'plan', 'update', 'submit', 'recover', 'defer', 'render', 'check', 'gate', 'close'):
+    for command in ('init', 'plan', 'update', 'submit', 'recover', 'defer', 'render', 'check', 'gate', 'close', 'outline-revise', 'outline-rescope'):
         sub = subs.add_parser(command)
         if command == 'gate':
             location = sub.add_mutually_exclusive_group(required=True)
@@ -1631,7 +1984,7 @@ def main(argv=None):
             location.add_argument('--book-ref', help='private external mapping; requires --neutral')
         else:
             sub.add_argument('--book', required=True)
-        if command in ('plan', 'update', 'submit', 'recover', 'defer'):
+        if command in ('plan', 'update', 'submit', 'recover', 'defer', 'outline-revise', 'outline-rescope'):
             sub.add_argument('--request', required=True)
         if command == 'init':
             sub.add_argument('--workflow', choices=['planning', 'materials', 'review_only'], default='planning',
@@ -1643,10 +1996,10 @@ def main(argv=None):
             sub.add_argument('--neutral', action='store_true', help='hide private validation details from independent readers')
     args = parser.parse_args(argv)
     try:
-        if args.command in ('plan', 'update', 'submit', 'recover', 'defer'):
+        if args.command in ('plan', 'update', 'submit', 'recover', 'defer', 'outline-revise', 'outline-rescope'):
             raw = args.request
             request = json.loads(raw) if raw.lstrip().startswith('{') else json.loads(Path(raw[1:] if raw.startswith('@') else raw).read_text(encoding='utf-8'))
-            result = globals()[args.command](args.book, request)
+            result = globals()[args.command.replace('-', '_')](args.book, request)
         elif args.command == 'check':
             result = check(args.book, args.stage)
         elif args.command == 'gate':

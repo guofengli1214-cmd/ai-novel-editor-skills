@@ -16,6 +16,9 @@ requires a matching deferred record and preserves title:""/title_status:"unresol
 A supplied API title_decision is checked
 before creating directories and preserved in the author's agreement record.
 Omitting it from the low-level API retains legacy fixture compatibility.
+Optional hidden_plot_decision (CLI --hidden-plot-decision) preserves the author's
+enabled/disabled choice; only enabled creates the empty hidden-plot management
+record. Omission leaves the question pending and never implies consent.
 Export does not require finalization.
 Public API: load_state(book), check_book(book), index_book(book),
 snapshot_book(book, label), restore_book(book, snapshot), export_book(book, output).
@@ -75,6 +78,19 @@ MANAGEMENT_FILES = {
         '## 来源与版本\n\n待登记。后续条目须引用作者约定、计划或正文及其文件版本；'
         '计划与正文实际分别记录，不把提案当作已发生事实。\n'),
 }
+
+# Optional: only create this empty record after a recorded author choice.
+HIDDEN_PLOT_FILE = '故事线/暗线剧情管理.md'
+HIDDEN_PLOT_TEMPLATE = (
+    '# 暗线剧情管理\n\n## 用途与职责\n\n'
+    '用途：管理幕后真实事件、明暗线因果、知情边界、线索及揭示的计划与实际。\n'
+    '专职角色：暗线管理子 agent；本次仅建立空入口，尚未派工分析。\n'
+    '作者选择启用管理不代表已选定任何幕后事件、秘密或揭示方案。\n\n'
+    '## 计划\n\n待建立。尚无已定暗线、幕后事件或揭示安排。\n\n'
+    '## 实际\n\n未分析。尚无正式正文，不登记已发生的幕后事件、知情或揭示。\n\n'
+    '## 来源与版本\n\n待登记。后续条目须引用作者决定、故事时间与叙述位置、'
+    '角色及读者知情、相关故事线和钩子标识、计划或正文及其文件版本；'
+    '计划与正文实际分别记录，不把提案当作已发生事实。\n')
 
 
 def digest(path):
@@ -144,7 +160,7 @@ def inventory(root, exclude_history=False, *, skip_snapshots=False):
         rel = parent.relative_to(root)
         if (skip_snapshots and len(rel.parts) == 2 and rel.parts[0] == HISTORY
                 and (parent / 'manifest.json').is_file()):
-            names[:] = [n for n in names if n != 'payload']
+            names[:] = [n for n in names if n not in ('payload', 'adoption-evidence')]
         dirs.append(parent.relative_to(root).as_posix())
         for name in entries:
             p = contained_path(root, parent / name)
@@ -247,31 +263,36 @@ def index_destination(root, child):
     return child.name + '/索引.md'
 
 
+def index_directory(root, folder):
+    """Refresh one live index; immutable archives are never rewritten."""
+    root, folder = Path(root), contained_path(root, folder)
+    if archived(root, folder):
+        return
+    target = contained_path(root, folder / '索引.md')
+    old = target.read_text(encoding='utf-8') if target.exists() else '# ' + folder.name + '\n\n本目录的文件与资料入口。\n'
+    if old.count(BEGIN) != old.count(END) or old.count(BEGIN) > 1 or (BEGIN in old and old.index(BEGIN) > old.index(END)):
+        raise ValueError('malformed automatic index block: ' + str(target))
+    lines = []
+    for child in sorted(folder.iterdir()):
+        contained_path(root, child)
+        if child.name == '索引.md':
+            continue
+        dest = index_destination(root, child)
+        label = child.name.replace('[', '\\[').replace(']', '\\]')
+        lines.append('- [' + label + '](' + quote(dest, safe='/') + ')')
+    block = BEGIN + '\n' + '\n'.join(lines) + '\n' + END
+    if BEGIN in old:
+        old = old[:old.index(BEGIN)] + block + old[old.index(END) + len(END):]
+    else:
+        old = old.rstrip() + '\n\n' + block + '\n'
+    atomic_write(target, old)
+
+
 def index_book(book):
     root = root_path(book)
     _, dirs = inventory(root)
     for directory in dirs:
-        folder = contained_path(root, root / directory)
-        if archived(root, folder):
-            continue
-        target = contained_path(root, folder / '索引.md')
-        old = target.read_text(encoding='utf-8') if target.exists() else '# ' + folder.name + '\n\n本目录的文件与资料入口。\n'
-        if old.count(BEGIN) != old.count(END) or old.count(BEGIN) > 1 or (BEGIN in old and old.index(BEGIN) > old.index(END)):
-            raise ValueError('malformed automatic index block: ' + str(target))
-        lines = []
-        for child in sorted(folder.iterdir()):
-            contained_path(root, child)
-            if child.name == '索引.md':
-                continue
-            dest = index_destination(root, child)
-            label = child.name.replace('[', '\\[').replace(']', '\\]')
-            lines.append('- [' + label + '](' + quote(dest, safe='/') + ')')
-        block = BEGIN + '\n' + '\n'.join(lines) + '\n' + END
-        if BEGIN in old:
-            old = old[:old.index(BEGIN)] + block + old[old.index(END) + len(END):]
-        else:
-            old = old.rstrip() + '\n\n' + block + '\n'
-        atomic_write(contained_path(root, target), old)
+        index_directory(root, root / directory)
 
 
 def markdown_prose(text):
@@ -447,7 +468,7 @@ def validate_directory_name(name):
 
 
 def init_book(parent, title='', *, task_management=True, title_decision=None, work_id=None,
-              initial_workflow='planning'):
+              initial_workflow='planning', hidden_plot_decision=None):
     if type(task_management) is not bool:
         raise ValueError('task_management must be boolean')
     if initial_workflow not in ('planning', 'materials', 'review_only'):
@@ -477,6 +498,20 @@ def init_book(parent, title='', *, task_management=True, title_decision=None, wo
                         '须保留原话、范围及后续取代关系。\n\n```json\n' +
                         json.dumps(naming_record, ensure_ascii=False, indent=2) + '\n```\n\n'
                         '此记录仅证明已申报的选名或明确暂缓定名，不产生正文、设定、剧情或后续创作授权。\n')
+    hidden_plot_status = '暗线剧情：待询问作者是否需要，未启用管理。\n'
+    if hidden_plot_decision is not None:
+        import taskctl
+        errors = taskctl.hidden_plot_decision_errors(hidden_plot_decision)
+        if errors:
+            raise ValueError('; '.join(errors))
+        hidden_plot_status = ('暗线剧情：作者已选择启用；具体暗线及揭示仍待已定选择与派工分析。\n'
+                              if hidden_plot_decision['value'] == 'enabled' else
+                              '暗线剧情：作者已选择不需要，已禁用暗线管理。\n')
+        if title_record is None:
+            title_record = '# 作者约定与授权\n'
+        title_record += ('\n## 初始化暗线决定\n\n```json\n' +
+                         json.dumps(hidden_plot_decision, ensure_ascii=False, indent=2) +
+                         '\n```\n\n此记录仅保存是否启用暗线管理的选择，不产生具体剧情、秘密或揭示方案的创作授权。\n')
     parent = Path(parent).absolute()
     if any(item.is_symlink() for item in (parent, *parent.parents)):
         raise ValueError('symbolic link in library path')
@@ -505,13 +540,16 @@ def init_book(parent, title='', *, task_management=True, title_decision=None, wo
             else:
                 taskctl.initialize(book, workflow=initial_workflow)
             task_link = '- [阶段任务与验收](任务计划与验收.md)\n'
-        for name, content in MANAGEMENT_FILES.items():
+        management_files = dict(MANAGEMENT_FILES)
+        if hidden_plot_decision is not None and hidden_plot_decision['value'] == 'enabled':
+            management_files[HIDDEN_PLOT_FILE] = HIDDEN_PLOT_TEMPLATE
+        for name, content in management_files.items():
             target = book / name
             target.parent.mkdir(exist_ok=True)
             atomic_write(target, content)
         management_links = ''.join('- [' + Path(name).stem + '](../' + name + ')\n'
-                                   for name in MANAGEMENT_FILES)
-        atomic_write(book / '创作约定/写作进度与接续说明.md', '# 写作进度与接续说明\n\n文件约定版本：1\n当前方案：待定；正式章节：无；故事时点：待定。\n作者参与与资料建设模式：待记录真实约定；尚无后续创作授权。\n\n## 交接入口\n\n- [资料索引](索引.md)\n- [全书索引](../索引.md)\n' + task_link + management_links + '\n## 待补充与下一步\n\n创作意图、语言标准与代表片段、阶段目标、故事线、人物成长与关系、近期事件、伏笔、知情与资源状态均待建立。\n独立阅读反馈与构思风险待记录。作者决定、未核实项、冲突与过期资料待核对。\n写前必读：本文件及全书索引；尚未进行正文与文学检查。\n中断更新事项以作品状态.json 的 pending_operations 为准。\n')
+                                   for name in management_files)
+        atomic_write(book / '创作约定/写作进度与接续说明.md', '# 写作进度与接续说明\n\n文件约定版本：1\n当前方案：待定；正式章节：无；故事时点：待定。\n作者参与与资料建设模式：待记录真实约定；尚无后续创作授权。\n' + hidden_plot_status + '\n## 交接入口\n\n- [资料索引](索引.md)\n- [全书索引](../索引.md)\n' + task_link + management_links + '\n## 待补充与下一步\n\n创作意图、语言标准与代表片段、阶段目标、故事线、人物成长与关系、近期事件、伏笔、知情与资源状态均待建立。\n独立阅读反馈与构思风险待记录。作者决定、未核实项、冲突与过期资料待核对。\n写前必读：本文件及全书索引；尚未进行正文与文学检查。\n中断更新事项以作品状态.json 的 pending_operations 为准。\n')
         index_book(book)
     except Exception:
         # Only remove the directory this invocation created. An existing work
@@ -543,6 +581,48 @@ def export_book(book, output):
     atomic_write(output, '\n\n'.join(texts) + ('\n' if texts else ''))
 
 
+def adoption_references(data):
+    """Conservatively find operation pointers in ordinary JSON/ledger bytes."""
+    matches = re.findall(
+        rb'"(?:adoption_operation_id|operation_id)"\s*:\s*"([0-9a-f]{32})"|chapter-([0-9a-f]{32})', data)
+    return {value.decode('ascii') for pair in matches for value in pair if value}
+
+
+def adoption_inventory(root):
+    """Inventory only direct adoption archives, never recursive book snapshots."""
+    root = root_path(root)
+    history = relative_path(root, HISTORY)
+    files, directories, operations, references = {}, {'.', HISTORY}, set(), set()
+    if history.exists():
+        for archive in sorted(history.iterdir()):
+            contained_path(root, archive)
+            if not re.fullmatch(r'chapter-[0-9a-f]{32}', archive.name):
+                continue
+            if not archive.is_dir():
+                raise ValueError('adoption archive is not a directory: ' + archive.name)
+            operation = archive.name[len('chapter-'):]
+            operations.add(operation)
+            local_files, local_dirs = inventory(archive)
+            prefix = HISTORY + '/' + archive.name
+            files.update({prefix + '/' + name: sha for name, sha in local_files.items()})
+            directories.update(prefix if name == '.' else prefix + '/' + name for name in local_dirs)
+            for name in ('journal.json', 'state.json'):
+                source = archive / name
+                if source.is_file():
+                    references.update(adoption_references(source.read_bytes()))
+            import chapterctl
+            journal = chapterctl.validate_adoption_archive(root, operation)
+            if journal['phase'] == 'completed' or (archive / 'completion.json').exists():
+                chapterctl.validate_sync_receipt(root, operation)
+    for name in (STATE, '创作约定/任务计划与验收.md'):
+        source = relative_path(root, name)
+        if source.is_file():
+            references.update(adoption_references(source.read_bytes()))
+    if references - operations:
+        raise ValueError('missing referenced adoption archives: ' + ', '.join(sorted(references - operations)))
+    return files, sorted(directories)
+
+
 def verify_snapshot(snapshot):
     snap = root_path(snapshot)
     manifest_path = relative_path(snap, 'manifest.json')
@@ -568,6 +648,32 @@ def verify_snapshot(snapshot):
         raise ValueError('snapshot manifest checksum/directory mismatch')
     if any(Path(p).parts[0] == HISTORY for p in files) or HISTORY in dirs:
         raise ValueError('snapshot contains history')
+    evidence = manifest.get('adoption_evidence')
+    if evidence is not None:
+        if (not isinstance(evidence, dict) or type(evidence.get('schema_version')) is not int
+                or evidence['schema_version'] != 1
+                or not isinstance(evidence.get('files'), dict)
+                or not isinstance(evidence.get('directories'), list)):
+            raise ValueError('invalid snapshot adoption evidence manifest')
+        evidence_root = relative_path(snap, 'adoption-evidence')
+        expected = (evidence['files'], evidence['directories'])
+        if inventory(evidence_root) != expected:
+            raise ValueError('snapshot adoption evidence checksum/directory mismatch')
+        if adoption_inventory(evidence_root) != expected:
+            raise ValueError('snapshot adoption evidence contains unsupported files')
+        # The payload ledger/state may reference an archive absent from the
+        # evidence even when every supplied file has a valid checksum.
+        required = set()
+        for name in (STATE, '创作约定/任务计划与验收.md'):
+            source = relative_path(payload, name)
+            if source.is_file():
+                required.update(adoption_references(source.read_bytes()))
+        available = {Path(name).parts[1][len('chapter-'):]
+                     for name in evidence['files'] if len(Path(name).parts) >= 3}
+        if required - available:
+            raise ValueError('snapshot lacks referenced adoption evidence: ' + ', '.join(sorted(required - available)))
+    elif any(name == 'adoption-evidence' or name.startswith('adoption-evidence/') for name in all_dirs):
+        raise ValueError('snapshot adoption evidence is not bound by manifest')
     load_state(payload)
     return payload
 
@@ -576,10 +682,11 @@ def snapshot_book(book, label):
     root = root_path(book)
     load_state(root)
     before = inventory(root, exclude_history=True)
+    before_adoptions = adoption_inventory(root)
     history = relative_path(root, HISTORY)
-    # The payload inventory deliberately excludes history. Check its fixed
-    # live index separately before creating even a partial new snapshot.
-    history_index = relative_path(root, HISTORY + '/索引.md')
+    # Resolve the live history index through the same link/path guard even
+    # though the book payload deliberately excludes history.
+    relative_path(root, HISTORY + '/索引.md')
     history.mkdir(exist_ok=True)
     snap = history / ('snapshot-' + uuid.uuid4().hex)
     snap.mkdir()
@@ -591,9 +698,20 @@ def snapshot_book(book, label):
             (payload / d).mkdir(exist_ok=True)
         for name in files:
             shutil.copy2(root / name, payload / name)
-        if inventory(payload) != before or inventory(root, exclude_history=True) != before:
+        evidence_root = snap / 'adoption-evidence'
+        evidence_root.mkdir()
+        adoption_files, adoption_dirs = before_adoptions
+        for directory in adoption_dirs:
+            (evidence_root / directory).mkdir(exist_ok=True)
+        for name in adoption_files:
+            shutil.copy2(root / name, evidence_root / name)
+        if (inventory(payload) != before or inventory(root, exclude_history=True) != before
+                or inventory(evidence_root) != before_adoptions
+                or adoption_inventory(root) != before_adoptions):
             raise ValueError('book changed while snapshotting')
-        atomic_write(snap / 'manifest.json', json.dumps(dict(schema_version=1, label=label, files=files, directories=dirs), ensure_ascii=False, indent=2) + '\n')
+        evidence = dict(schema_version=1, files=adoption_files, directories=adoption_dirs)
+        atomic_write(snap / 'manifest.json', json.dumps(dict(schema_version=1, label=label, files=files, directories=dirs,
+                                                          adoption_evidence=evidence), ensure_ascii=False, indent=2) + '\n')
         atomic_write(snap / '索引.md', '# 历史快照\n\n- [校验清单](manifest.json)：文件哈希、目录与快照标签。\n- [快照内容](payload/索引.md)：恢复用的原始文件，不在此处编辑。\n')
         verify_snapshot(snap)
         # Maintain only the live history directory index; never rewrite payloads.
@@ -634,17 +752,35 @@ def restore_book(book, snapshot):
         shutil.copytree(payload, stage, dirs_exist_ok=True)
         if inventory(stage) != inventory(payload):
             raise ValueError('staging verification failed')
+        shutil.copytree(root / HISTORY, stage / HISTORY)
+        manifest = json.loads((snap / 'manifest.json').read_text(encoding='utf-8'))
+        evidence = manifest.get('adoption_evidence')
+        if evidence is not None:
+            evidence_history = snap / 'adoption-evidence' / HISTORY
+            for archive in evidence_history.iterdir():
+                destination = stage / HISTORY / archive.name
+                if destination.exists():
+                    shutil.rmtree(destination)  # Only the uncommitted staging copy.
+                shutil.copytree(archive, destination)
+        try:
+            adoption_inventory(stage)
+        except (ValueError, OSError, TypeError, KeyError) as exc:
+            detail = ('legacy snapshot has no adoption evidence backup; restore requires intact current archives or a trusted complete book backup'
+                      if evidence is None else
+                      'snapshot cannot repair other adoption history; quarantine only archives proven unreferenced, then retry')
+            raise ValueError(detail + ': ' + str(exc)) from exc
         try:
             load_state(root)
+            adoption_inventory(root)
         except (ValueError, OSError, TypeError, KeyError, AttributeError):
-            # A broken/missing live state is a reason to restore, not a reason
-            # to reject a verified snapshot. The original complete directory
-            # is preserved by the rename below; do not manufacture an invalid
-            # formal snapshot or weaken verify_snapshot to accept this scene.
+            # Invalid live state/history is retained exactly in the sibling
+            # recovery directory, never blessed as a new trusted snapshot.
             backup = None
         else:
             backup = snapshot_book(root, 'pre-restore')
-        shutil.copytree(root / HISTORY, stage / HISTORY)
+            shutil.copytree(backup, stage / HISTORY / backup.name)
+            shutil.copy2(root / HISTORY / '索引.md', stage / HISTORY / '索引.md')
+        index_directory(stage, stage / HISTORY)
         os.rename(root, recovery)
         try:
             os.rename(stage, root)
@@ -668,6 +804,8 @@ def main(argv=None):
                    help='initial authorized task; materials and review_only do not begin novel writing')
     p.add_argument('--title-decision', required=True,
                    help='actual author title decision: JSON object, JSON-file path or @file')
+    p.add_argument('--hidden-plot-decision',
+                   help='optional actual author choice, value enabled/disabled: JSON object, JSON-file path or @file')
     for command in ('index', 'check', 'export', 'snapshot', 'restore'):
         p = sub.add_parser(command); p.add_argument('--book', required=True)
         if command == 'check': p.add_argument('--skip-snapshots', action='store_true', help='skip immutable snapshot payload verification (read-only quick check)')
@@ -682,8 +820,15 @@ def main(argv=None):
                         json.loads(Path(raw[1:] if raw.startswith('@') else raw).read_text(encoding='utf-8-sig')))
             if not isinstance(decision, dict):
                 raise ValueError('title decision must be a JSON object')
+            hidden_plot_decision = None
+            if args.hidden_plot_decision is not None:
+                raw = args.hidden_plot_decision
+                hidden_plot_decision = (json.loads(raw) if raw.lstrip().startswith('{') else
+                                        json.loads(Path(raw[1:] if raw.startswith('@') else raw).read_text(encoding='utf-8-sig')))
+                if not isinstance(hidden_plot_decision, dict):
+                    raise ValueError('hidden plot decision must be a JSON object')
             print(init_book(args.parent, args.title, title_decision=decision, work_id=args.work_id,
-                            initial_workflow=args.workflow))
+                            initial_workflow=args.workflow, hidden_plot_decision=hidden_plot_decision))
         elif args.command == 'index': index_book(args.book)
         elif args.command == 'check':
             issues = check_book(args.book, verify_snapshots=not args.skip_snapshots)

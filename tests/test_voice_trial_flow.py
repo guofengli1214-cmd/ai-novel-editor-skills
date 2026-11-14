@@ -110,6 +110,8 @@ class VoiceTrialFlowTests(unittest.TestCase):
             for category, topics in tc.DIRECTION_DECISIONS.items():
                 checks[category]['decisions'] = {topic: dict(choice) for topic in topics}
             checks['startup_mode']['decision'] = dict(choice)
+            checks['author_preferences']['decisions']['hidden_plot'] = dict(
+                choice, value='disabled')
             checks['author_preferences']['decisions']['title'] = dict(
                 choice, value=nc.load_state(self.root)['title'], prior_status='proposed')
         if kind == 'prepare':

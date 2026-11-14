@@ -36,6 +36,8 @@ class DeferredTitleTests(unittest.TestCase):
         for category, topics in tc.DIRECTION_DECISIONS.items():
             checks[category]['decisions'] = {topic: dict(selected) for topic in topics}
         checks['startup_mode']['decision'] = dict(selected)
+        checks['author_preferences']['decisions']['hidden_plot'] = dict(
+            selected, value='disabled')
         checks['author_preferences']['decisions']['title'] = copy.deepcopy(self.decision)
         return dict(stage='S01', task='direction', outputs=[evidence], checks=checks)
 

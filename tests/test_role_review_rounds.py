@@ -74,7 +74,8 @@ class RoleReviewRoundTests(unittest.TestCase):
         tc.update(self.root, dict(stage='S02', task=task_id, status='todo',
                                   inputs=combined, outputs=[], checks=preflight))
         tc.gate(self.root, 'S02', task_id)
-        tc.update(self.root, dict(stage='S02', task=task_id, status='doing'))
+        tc.update(self.root, dict(stage='S02', task=task_id, status='doing',
+                                  inputs=combined, reason='按本轮技术输入显式执行或重新执行角色任务'))
         self.f.write(path, '纯技术夹具的轮次报告或版本标记：' + path + '。不是小说或实际阅读结论。')
         evidence = self.f.ev(path)
         checks = self.f.checks(task['kind'], [evidence])
