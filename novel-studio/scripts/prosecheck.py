@@ -29,6 +29,8 @@ With --book, both paths must be canonical relative paths inside the work and
 --policy is required. Output is {draft_sha256, policy: {path, sha256}, result};
 hashes cover the exact bytes read, including comments and line endings. This
 envelope can be saved externally as adoption evidence; the script saves nothing.
+CLI: prosecheck.py validate-policy --book BOOK --policy REL
+Validates the rules file before a draft exists and returns {path, sha256}.
 Exit status: 0 (no errors), 1 (text errors), 2 (configuration/read errors).
 The command writes JSON to stdout and never writes the source or policy file.
 """
@@ -274,7 +276,11 @@ def main(argv=None):
     check.add_argument('--file', required=True)
     check.add_argument('--policy')
     check.add_argument('--book', type=Path)
+    validate = commands.add_parser('validate-policy', help='只读校验规则，输出路径与哈希')
+    validate.add_argument('--book', required=True, type=Path)
+    validate.add_argument('--policy', required=True)
     args = parser.parse_args(argv)
+    validate_only = args.command == 'validate-policy'
     try:
         if args.book:
             if not args.policy:
@@ -284,7 +290,8 @@ def main(argv=None):
             sys.dont_write_bytecode = True
             import novelctl as nc
             root = nc.root_path(args.book)
-            source_file = nc.relative_path(root, args.file)
+            if not validate_only:
+                source_file = nc.relative_path(root, args.file)
             policy_file = nc.relative_path(root, args.policy)
         else:
             source_file = Path(args.file)
@@ -293,12 +300,17 @@ def main(argv=None):
         policy = json.loads(policy_bytes.decode('utf-8-sig')) if policy_bytes is not None else None
         if policy_file and not isinstance(policy, dict):
             raise ValueError('policy file must contain a JSON object')
+        if args.book:
+            policy_ref = {'path': args.policy, 'sha256': hashlib.sha256(policy_bytes).hexdigest()}
+        if validate_only:
+            _policy(policy)
+            print(json.dumps(policy_ref, ensure_ascii=False, indent=2))
+            return 0
         source_bytes = source_file.read_bytes()
         checked = check_text(source_bytes.decode('utf-8'), policy)
         if args.book:
             result = {'draft_sha256': hashlib.sha256(source_bytes).hexdigest(),
-                      'policy': {'path': args.policy,
-                                 'sha256': hashlib.sha256(policy_bytes).hexdigest()},
+                      'policy': policy_ref,
                       'result': checked}
         else:
             result = dict(checked, file=args.file)

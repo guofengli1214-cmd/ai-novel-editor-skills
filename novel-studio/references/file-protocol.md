@@ -203,6 +203,12 @@ schema 2 中每个问题增加 `priority: major|optional`，与 `severity` 分�
 
 所有键可省略；`quote_style` 支持 `chinese_double/corner/unspecified`，默认双引号建议不是作者确认。`quote_confirmed` 只有真实明确约定时才设 true。`chapter_length` 可有非负整数 `target_min`、`target_max`、`hard_max`，目标与硬上限不得矛盾；`count_by` 为 `han` 或 `non_whitespace`。只有明确硬上限才能填 `hard_max`，不把建议篇幅升级成阻断规则。未知键或无效配置拒绝执行，变更规则需重开准备及受影响任务。
 
+开稿前可在没有正文时校验规则文件。`--book` 和 `--policy` 均为必填，`--policy` 使用作品内规范相对路径。成功时退出 0，标准输出为 `{path,sha256}` JSON，哈希按规则文件原始字节计算。读取或校验失败时退出 2，标准输出为带 `INPUT_ERROR` 的 JSON。命令只读，校验范围限于文件格式与字段约束。规则是否得到作者授权，仍须由主 agent 对照作者证据核验。实际正文报告在成稿后运行 `check` 生成。
+
+```bash
+python "$SKILL/scripts/prosecheck.py" validate-policy --book "$BOOK" --policy 创作约定/正文检查规则-v1.json
+```
+
 ```bash
 python "$SKILL/scripts/prosecheck.py" check --book "$BOOK" --file 草稿与备选/当前章稿.md --policy 创作约定/正文检查规则-v1.json
 ```

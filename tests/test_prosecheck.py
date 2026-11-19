@@ -304,6 +304,44 @@ class ProsecheckTests(unittest.TestCase):
             self.assertEqual(run.returncode, 2)
             self.assertIn('JSON object', json.loads(run.stdout)['findings'][0]['message'])
 
+    def test_validate_policy_binds_original_bytes_without_a_draft(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            policy = root / '规则.json'
+            policy_bytes = b'\xef\xbb\xbf{"quote_confirmed": false}\r\n'
+            policy.write_bytes(policy_bytes)
+            before = policy.stat().st_mtime_ns
+            run = subprocess.run([sys.executable, str(SCRIPT), 'validate-policy',
+                                  '--book', str(root), '--policy', policy.name],
+                                 capture_output=True, text=True, encoding='utf-8')
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertEqual(json.loads(run.stdout), {
+                'path': policy.name, 'sha256': hashlib.sha256(policy_bytes).hexdigest()})
+            self.assertEqual(run.stderr, '')
+            self.assertEqual(list(root.iterdir()), [policy])
+            self.assertEqual((policy.read_bytes(), policy.stat().st_mtime_ns), (policy_bytes, before))
+
+    def test_validate_policy_rejects_bad_input_without_a_draft(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'syntax.json').write_text('{broken', encoding='utf-8')
+            (root / 'shape.json').write_text('null', encoding='utf-8')
+            (root / 'rules.json').write_text(
+                '{"chapter_length": {"target_min": 20, "hard_max": 10}}', encoding='utf-8')
+            for relative, message in [('syntax.json', 'Expecting'), ('shape.json', 'JSON object'),
+                                      ('rules.json', 'must not exceed hard_max'),
+                                      ('missing.json', 'missing.json'), ('../rules.json', None)]:
+                with self.subTest(relative=relative):
+                    run = subprocess.run([sys.executable, str(SCRIPT), 'validate-policy',
+                                          '--book', str(root), '--policy', relative],
+                                         capture_output=True, text=True, encoding='utf-8')
+                    self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+                    self.assertEqual(run.stderr, '')
+                    finding = json.loads(run.stdout)['findings'][0]
+                    self.assertEqual(finding['code'], 'INPUT_ERROR')
+                    if message:
+                        self.assertIn(message, finding['message'])
+
 
 if __name__ == '__main__':
     unittest.main()
